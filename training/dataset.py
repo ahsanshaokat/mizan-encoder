@@ -3,14 +3,14 @@ import torch
 from torch.utils.data import Dataset
 
 class PairDataset(Dataset):
-    def __init__(self, file_path, tokenizer, max_len=256):
+    def __init__(self, file_path, tokenizer, max_len=256, subset = None):
         self.data = [json.loads(l) for l in open(file_path, "r", encoding="utf-8")]
 
         # ★ NEW: subset support
         if subset is not None:
             print(f"Using subset of {subset} samples (CPU-fast mode)")
             self.data = self.data[:subset]
-            
+
         self.tokenizer = tokenizer
         self.max_len = max_len
 
