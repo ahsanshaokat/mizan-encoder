@@ -1,0 +1,6 @@
+include README.md
+include LICENSE
+recursive-include mizan_encoder *
+recursive-include inference *
+recursive-include trainer *
+recursive-include tests *
