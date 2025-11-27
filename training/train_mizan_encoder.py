@@ -33,18 +33,16 @@ from training.trainer import MizanTrainer
 def get_args():
     parser = argparse.ArgumentParser(description="Train MizanTextEncoder")
 
-    parser.add_argument("--data", type=str, default="scripts/data/all_pairs.jsonl",
-                        help="Path to the training dataset (jsonl)")
-    parser.add_argument("--backbone", type=str, default="distilbert-base-uncased",
-                        help="HF transformer backbone")
-    parser.add_argument("--output", type=str, default="saved/mizan_encoder_v1",
-                        help="Directory to save the trained model")
-    parser.add_argument("--batch_size", type=int, default=16,
-                        help="Batch size")
-    parser.add_argument("--epochs", type=int, default=3,
-                        help="Number of epochs")
-    parser.add_argument("--lr", type=float, default=2e-5,
-                        help="Learning rate")
+    parser.add_argument("--data", type=str, default="scripts/data/all_pairs.jsonl")
+    parser.add_argument("--backbone", type=str, default="distilbert-base-uncased")
+    parser.add_argument("--output", type=str, default="saved/mizan_encoder_v1")
+    parser.add_argument("--batch_size", type=int, default=16)
+    parser.add_argument("--epochs", type=int, default=3)
+    parser.add_argument("--lr", type=float, default=2e-5)
+
+    # ★ NEW ARGUMENT
+    parser.add_argument("--subset", type=int, default=None,
+                        help="Use only first N samples for CPU-fast training")
 
     return parser.parse_args()
 
@@ -72,7 +70,7 @@ def main():
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
 
     # Dataset + DataLoader
-    dataset = PairDataset(args.data, tokenizer)
+    dataset = PairDataset(args.data, tokenizer, subset=args.subset)
     loader = DataLoader(
         dataset,
         batch_size=args.batch_size,
