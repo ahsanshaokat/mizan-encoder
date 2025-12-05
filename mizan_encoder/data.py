@@ -45,35 +45,44 @@ def load_sts_tsv(path, sample_size=None):
 # SNLI Loader (JSONL → pairs)
 # =====================================================================
 def load_snli_jsonl(path, sample_size=None):
+    import json
     pairs = []
+
     with open(path, "r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
-            if not line:
+            if not line:      # ← FIX: skip empty lines
                 continue
 
-            obj = json.loads(line)
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue  # skip malformed lines
 
-            if obj["gold_label"] not in ["entailment", "contradiction", "neutral"]:
+            label = obj.get("gold_label", None)
+            if label not in ["entailment", "contradiction", "neutral"]:
                 continue
 
-            s1 = obj["sentence1"]
-            s2 = obj["sentence2"]
+            s1 = obj.get("sentence1", "").strip()
+            s2 = obj.get("sentence2", "").strip()
+            if not s1 or not s2:
+                continue
 
-            if obj["gold_label"] == "entailment":
-                label = 1.0
-            elif obj["gold_label"] == "contradiction":
-                label = 0.0
+            if label == "entailment":
+                y = 1.0
+            elif label == "contradiction":
+                y = 0.0
             else:
-                label = 0.5
+                y = 0.5
 
-            pairs.append((s1, s2, label))
+            pairs.append((s1, s2, y))
 
     if sample_size:
         pairs = pairs[:sample_size]
 
-    print(f"Loaded SNLI pairs: {len(pairs)}")
+    print(f"Loaded SNLI pairs: {len(pairs)} from {path}")
     return pairs
+
 
 
 # =====================================================================
