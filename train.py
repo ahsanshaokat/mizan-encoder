@@ -66,24 +66,29 @@ def train(config_path):
     # 5) TRAIN LOOP
     # =====================================================
     for epoch in range(config["epochs"]):
-        total_loss = 0
+        for batch in loader:
+            text1, text2, labels = batch
 
-        for text1, text2, labels in loader:
-            labels = labels.to(device)
+            # Tokenize
+            t1 = tokenizer(text1, return_tensors="pt", padding=True, truncation=True, max_length=256).to(device)
+            t2 = tokenizer(text2, return_tensors="pt", padding=True, truncation=True, max_length=256).to(device)
 
-            emb1 = model.encode(text1, tokenizer, device=device)
-            emb2 = model.encode(text2, tokenizer, device=device)
+            # Forward pass WITH gradients
+            emb1 = model(t1["input_ids"], t1["attention_mask"])
+            emb2 = model(t2["input_ids"], t2["attention_mask"])
 
+            # Compute loss
+            labels = labels.to(device).float()
             loss = loss_fn(emb1, emb2, labels)
 
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
 
-            total_loss += loss.item()
+        print(f"Epoch {epoch} | Loss = {loss.item():.4f}")
 
-        avg = total_loss / len(loader)
-        print(f"Epoch {epoch+1}/{config['epochs']} | Loss = {avg:.4f}")
+
+
 
     # =====================================================
     # 6) SAVE MODEL
