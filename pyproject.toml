@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mizan-encoder"
-version = "0.1.0"
+version = "0.1.1"
 description = "A scale-aware embedding model and training framework optimized for the Mizan Balance Function."
 readme = "README.md"
 requires-python = ">=3.9"

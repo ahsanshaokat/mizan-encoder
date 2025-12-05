@@ -1,6 +1,6 @@
 Metadata-Version: 2.4
 Name: mizan-encoder
-Version: 0.1.0
+Version: 0.1.1
 Summary: A scale-aware embedding model and training framework optimized for the Mizan Balance Function.
 Author-email: Ahsan Shaokat <your-email@example.com>
 License: MIT

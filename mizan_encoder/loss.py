@@ -33,3 +33,21 @@ class MizanContrastiveLoss(nn.Module):
         pos_loss = 1 - sim
         neg_loss = torch.clamp(self.margin - sim, min=0)
         return torch.where(label == 1, pos_loss, neg_loss).mean()
+
+
+class MizanLoss(nn.Module):
+    def __init__(self, alpha=0.2):
+        super().__init__()
+        self.alpha = alpha
+
+    def forward(self, emb1, emb2, labels):
+        # direction loss
+        cos = F.cosine_similarity(emb1, emb2)
+        dir_loss = (1 - cos) * labels + (cos) * (1 - labels)
+
+        # scale loss
+        scale1 = emb1.norm(dim=-1)
+        scale2 = emb2.norm(dim=-1)
+        scale_loss = ((scale1 - scale2).abs()) * self.alpha
+
+        return dir_loss.mean() + scale_loss.mean()

@@ -43,17 +43,21 @@ class MizanTextEncoder(nn.Module):
         return x / (norm + eps) ** self.alpha
 
     # -------------------------------------------------------------
-    def forward(self, input_ids, attention_mask):
+    def forward(self, input_ids, attention_mask, token_type_ids=None):
+        # Conditional passing of token_type_ids
+        supports_tti = "token_type_ids" in self.transformer.forward.__code__.co_varnames
+
         out = self.transformer(
             input_ids=input_ids,
-            attention_mask=attention_mask
+            attention_mask=attention_mask,
+            token_type_ids=token_type_ids if supports_tti else None
         )
 
         pooled = self.pooler(out.last_hidden_state, attention_mask)
         projected = self.proj(pooled)
         stabilized = self.scale_stabilize(projected)
         return stabilized
-
+    
     # -------------------------------------------------------------
     # Save the Encoder (like HuggingFace)
     def save_pretrained(self, directory):

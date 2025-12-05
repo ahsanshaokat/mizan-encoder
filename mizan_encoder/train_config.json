@@ -1,0 +1,15 @@
+{
+  "backbone": "sentence-transformers/all-MiniLM-L6-v2",
+  "pooling": "mean",
+  "proj_dim": 384,
+  "alpha": 0.2,
+
+  "sts_samples": 5000,
+  "nli_samples": 50000,
+
+  "batch_size": 32,
+  "lr": 2e-5,
+  "epochs": 2,
+
+  "output_dir": "saved/mizan_encoder_v1"
+}
