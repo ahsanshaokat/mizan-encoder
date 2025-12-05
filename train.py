@@ -38,10 +38,11 @@ def train(config_path):
     # 3) LOAD DATASETS
     # =====================================================
     print("📚 Loading STS-B dataset...")
-    sts = load_sts_tsv(config["sts_path"], sample_size=config["sts_samples"])
+    nli = load_snli_jsonl(config["nli_path"], sample_size=config["nli_samples"])
 
     print("📚 Loading SNLI dataset...")
-    nli = load_snli_jsonl(config["nli_path"], sample_size=config["nli_samples"])
+    sts = load_sts_tsv(config["sts_path"], sample_size=config["sts_samples"])
+
 
     all_pairs = sts + nli
     dataset = PairDataset(all_pairs)

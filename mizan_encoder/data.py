@@ -15,70 +15,64 @@ from torch.utils.data import Dataset
 # =====================================================================
 # STS-B Loader (TSV → pairs)
 # =====================================================================
-def load_sts_tsv(path: str, sample_size=None):
-    """
-    Loads STS-B (train/dev/test) from TSV.
-    Output: [(s1, s2, label)]
-    label: 1 if score >= 3.0 else 0
-    """
+def load_sts_tsv(path, sample_size=None):
+    import csv
+
     pairs = []
+    with open(path, "r", encoding="utf-8") as f:
+        tsv = csv.reader(f, delimiter="\t")
+        next(tsv)  # skip header
 
-    with open(path, "r", encoding="utf8") as f:
-        reader = csv.reader(f, delimiter="\t")
-        header = next(reader)  # skip header
-
-        for row in reader:
+        for row in tsv:
             if len(row) < 7:
                 continue
 
-            score = float(row[4])
             s1 = row[5]
             s2 = row[6]
+            score = float(row[4]) / 5.0  # normalize 0-1
 
-            label = 1 if score >= 3 else 0
-            pairs.append((s1, s2, label))
+            pairs.append((s1, s2, score))
 
     if sample_size:
-        random.shuffle(pairs)
         pairs = pairs[:sample_size]
 
+    print(f"Loaded STS pairs: {len(pairs)}")
     return pairs
+
 
 
 # =====================================================================
 # SNLI Loader (JSONL → pairs)
 # =====================================================================
-def load_snli_jsonl(path: str, sample_size=None):
-    """
-    Loads SNLI .jsonl files.
-    Converts:
-        entailment → 1
-        contradiction → 0
-    Skips "neutral".
-    """
+def load_snli_jsonl(path, sample_size=None):
     pairs = []
-
-    with open(path, "r", encoding="utf8") as f:
+    with open(path, "r", encoding="utf-8") as f:
         for line in f:
+            line = line.strip()
+            if not line:
+                continue
+
             obj = json.loads(line)
 
-            label_txt = obj.get("gold_label", "")
-            if label_txt == "entailment":
-                label = 1
-            elif label_txt == "contradiction":
-                label = 0
-            else:
-                continue  # skip neutral / invalid
+            if obj["gold_label"] not in ["entailment", "contradiction", "neutral"]:
+                continue
 
             s1 = obj["sentence1"]
             s2 = obj["sentence2"]
 
+            if obj["gold_label"] == "entailment":
+                label = 1.0
+            elif obj["gold_label"] == "contradiction":
+                label = 0.0
+            else:
+                label = 0.5
+
             pairs.append((s1, s2, label))
 
     if sample_size:
-        random.shuffle(pairs)
         pairs = pairs[:sample_size]
 
+    print(f"Loaded SNLI pairs: {len(pairs)}")
     return pairs
 
 
