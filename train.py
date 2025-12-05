@@ -95,4 +95,4 @@ def train(config_path):
 
     print("✅ Training complete.")
 
-train()
+train("configs/small.json")
