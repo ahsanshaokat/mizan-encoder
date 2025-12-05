@@ -15,8 +15,9 @@ class BalancedMeanPooling(nn.Module):
     But carefully stabilized with clamp for numerical safety.
     """
 
-    def forward(self, token_embeddings, attention_mask):
-        mask = attention_mask.unsqueeze(-1).float()
-        summed = (token_embeddings * mask).sum(dim=1)
-        count = mask.sum(dim=1)
-        return summed / torch.clamp(count, min=1e-9)
+    def forward(self, hidden, mask):
+        weights = mask.float()
+        denom = weights.sum(dim=1, keepdim=True).clamp(min=1e-6)
+
+        pooled = (hidden * weights.unsqueeze(-1)).sum(dim=1) / denom
+        return pooled

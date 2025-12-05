@@ -70,7 +70,7 @@ class MizanEncoderHF(PreTrainedModel):
 
         pooled = self.pooling(out.last_hidden_state, attention_mask)
         emb = self.proj(pooled)
-
+        emb = torch.nn.functional.normalize(emb, dim=-1)
         return emb
 
     # --------------------------------------------------------------

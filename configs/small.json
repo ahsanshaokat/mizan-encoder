@@ -1,18 +1,23 @@
 {
   "backbone": "sentence-transformers/all-MiniLM-L6-v2",
   "pooling": "balanced-mean",
+
   "emb_dim": 384,
   "proj_dim": 384,
+
   "batch_size": 16,
-  "lr": 2e-5,
   "epochs": 1,
+
   "alpha": 0.2,
 
   "sts_path": "scripts/data/sts_raw/STS-B/train.tsv",
   "nli_path": "scripts/data/snli_1.0/snli_1.0_train.jsonl",
 
-  "sts_samples": 2000,
-  "nli_samples": 3000,
+  "sts_samples": 10000,
+  "nli_samples": 40000,
 
-  "output_dir": "checkpoints/mizan_encoder_small"
+  "output_dir": "checkpoints/mizan_encoder_small_50k",
+
+  "lr_backbone": 2e-5,
+  "lr_proj": 5e-4
 }
