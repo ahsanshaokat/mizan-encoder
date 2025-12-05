@@ -94,3 +94,5 @@ def train(config_path):
     tokenizer.save_pretrained(config["output_dir"])
 
     print("✅ Training complete.")
+
+train()
