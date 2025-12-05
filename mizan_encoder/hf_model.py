@@ -5,6 +5,7 @@ Allows:
 ✔ save_pretrained()
 ✔ from_pretrained()
 ✔ encode() for inference
+✔ Extra config fields (proj_dim, pooling, backbone_name)
 """
 
 import torch
@@ -23,13 +24,14 @@ class MizanEncoderConfig(PretrainedConfig):
     def __init__(self,
                  backbone_name="sentence-transformers/all-MiniLM-L6-v2",
                  pooling="balanced-mean",
-                 emb_dim=384,
+                 proj_dim=384,
                  **kwargs):
+
         super().__init__(**kwargs)
 
         self.backbone_name = backbone_name
         self.pooling = pooling
-        self.emb_dim = emb_dim
+        self.proj_dim = proj_dim  # instead of emb_dim (HF safe)
 
 
 # ---------------------------------------------------------------------
@@ -38,7 +40,11 @@ class MizanEncoderConfig(PretrainedConfig):
 class MizanEncoderHF(PreTrainedModel):
     config_class = MizanEncoderConfig
 
-    def __init__(self, config):
+    def __init__(self, config, **unused_kwargs):
+        """
+        NOTE: HF may pass additional arguments stored in config.json.
+        We MUST accept **unused_kwargs to prevent crashes.
+        """
         super().__init__(config)
 
         # Load backbone transformer
@@ -48,15 +54,19 @@ class MizanEncoderHF(PreTrainedModel):
         self.pooling = BalancedMeanPooling()
 
         # Optional projection head
-        self.proj = nn.Linear(self.backbone.config.hidden_size,
-                              config.emb_dim)
+        hidden = self.backbone.config.hidden_size
+        proj_dim = config.proj_dim
+
+        self.proj = nn.Linear(hidden, proj_dim)
 
     # --------------------------------------------------------------
     # Forward pass used for training
     # --------------------------------------------------------------
     def forward(self, input_ids, attention_mask):
-        out = self.backbone(input_ids=input_ids,
-                            attention_mask=attention_mask)
+        out = self.backbone(
+            input_ids=input_ids,
+            attention_mask=attention_mask
+        )
 
         pooled = self.pooling(out.last_hidden_state, attention_mask)
         emb = self.proj(pooled)
@@ -64,7 +74,7 @@ class MizanEncoderHF(PreTrainedModel):
         return emb
 
     # --------------------------------------------------------------
-    # Encode with text input
+    # Encode API for inference
     # --------------------------------------------------------------
     def encode(self, sentences, tokenizer=None, device="cpu"):
         if isinstance(sentences, str):
@@ -79,16 +89,13 @@ class MizanEncoderHF(PreTrainedModel):
             padding=True,
             truncation=True,
             max_length=256
-        )
-
-        input_ids = enc["input_ids"].to(device)
-        attention_mask = enc["attention_mask"].to(device)
+        ).to(device)
 
         with torch.no_grad():
-            emb = self.forward(input_ids, attention_mask)
+            emb = self.forward(enc["input_ids"], enc["attention_mask"])
 
-        return emb.squeeze(0)
-
+        # return (batch, dim)
+        return emb
 
 # ---------------------------------------------------------------------
 # Load from directory
