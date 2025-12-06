@@ -12,21 +12,36 @@ from transformers import AutoTokenizer, AutoModel, get_cosine_schedule_with_warm
 
 def load_sts(path, sample_size=None):
     """Load STS-B data (tab-separated):
-       sentence1 | sentence2 | score"""
+       sentence1 | sentence2 | score
+       Skips header rows safely.
+    """
     pairs = []
+
     with open(path, "r", encoding="utf-8") as f:
         for line in f:
             parts = line.strip().split("\t")
+
+            # Skip malformed or header lines
             if len(parts) < 7:
                 continue
-            s1, s2, score = parts[5], parts[6], float(parts[4])
-            score = score / 5.0   # normalize to [0,1]
+
+            # Try parsing the score column
+            try:
+                score = float(parts[4])
+            except ValueError:
+                # This happens for header "old_index" or similar → SKIP
+                continue
+
+            s1, s2 = parts[5], parts[6]
+            score = score / 5.0  # normalize 0–1
+
             pairs.append((s1, s2, score))
 
     if sample_size:
         pairs = random.sample(pairs, min(sample_size, len(pairs)))
 
     return pairs
+
 
 
 def load_snli(path, sample_size=None):
