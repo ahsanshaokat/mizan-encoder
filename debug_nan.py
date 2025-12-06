@@ -200,30 +200,68 @@ def sts_like_test(model, tokenizer):
 
 
 # =====================================================================
+# NEW: COSINE vs MIZAN SIMILARITY COMPARISON
+# =====================================================================
+
+def mizan_similarity(e1, e2, alpha=0.15):
+    # Mizan scale-aware similarity (same formula used during training)
+    dot = (e1 * e2).sum(dim=-1)
+
+    n1 = torch.norm(e1, dim=-1).clamp(min=1e-6)
+    n2 = torch.norm(e2, dim=-1).clamp(min=1e-6)
+
+    denom = (n1 ** alpha) * (n2 ** alpha)
+    return (dot / denom).item()
+
+
+def compare_similarity(model, tokenizer, alpha=0.15):
+    print("\n==============================")
+    print("🔬 COSINE vs MIZAN SIMILARITY")
+    print("==============================")
+
+    pairs = [
+        ("A cat sits on the mat.", "A dog sits on the rug."),
+        ("The stock market crashed today.", "Financial markets fell."),
+        ("I love pizza.", "The moon is blue."),
+        ("AI will change the world.", "Artificial intelligence will transform society.")
+    ]
+
+    for s1, s2 in pairs:
+        t1 = tokenizer(s1, return_tensors="pt", padding=True, truncation=True)
+        t2 = tokenizer(s2, return_tensors="pt", padding=True, truncation=True)
+
+        with torch.no_grad():
+            e1 = model(**t1)
+            e2 = model(**t2)
+
+        cos = torch.nn.functional.cosine_similarity(e1, e2).item()
+        miz = mizan_similarity(e1, e2, alpha=alpha)
+
+        print("\n----------------------")
+        print(f"📝 Sentence 1: {s1}")
+        print(f"📝 Sentence 2: {s2}")
+        print(f"Cosine similarity: {cos:.4f}")
+        print(f"Mizan similarity:  {miz:.4f}")
+        print(f"Δ (Mizan − Cosine): {miz - cos:.4f}")
+
+# =====================================================================
 # MAIN SCRIPT
 # =====================================================================
 
 if __name__ == "__main__":
     ckpt = "checkpoints/mizan_singlefile"
 
-    print("\n==============================")
-    print("🔬 LOADING TOKENIZER")
-    print("==============================")
-
     tokenizer = AutoTokenizer.from_pretrained(ckpt)
-
-    print("\n==============================")
-    print("🔬 LOADING MODEL")
-    print("==============================")
-
     model = DebugMizanEncoder.load_finetuned(ckpt)
 
-    # ---- Tests ----
     test_single_sentence(model, tokenizer)
     test_batch(model, tokenizer)
 
-    # ---- NEW Similarity Tests ----
     similarity_test_pairs(model, tokenizer)
     sts_like_test(model, tokenizer)
 
+    # NEW
+    compare_similarity(model, tokenizer)
+
     print("\n🎯 DEBUGGING COMPLETE\n")
+
