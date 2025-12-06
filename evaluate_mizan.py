@@ -169,7 +169,7 @@ def evaluate_sts(model, tokenizer, sts_pairs, alpha=0.15, device="cpu"):
 # ============================================================
 
 if __name__ == "__main__":
-    ckpt = "checkpoints/mizan_proper"
+    ckpt = "checkpoints/mizan_properloss"
     sts_test_path = "scripts/data/sts_raw/STS-B/dev.tsv"
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
