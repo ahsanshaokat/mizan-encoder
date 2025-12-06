@@ -62,10 +62,14 @@ class MizanEncoderHF(PreTrainedModel):
     # --------------------------------------------------------------
     # Forward pass used for training
     # --------------------------------------------------------------
-    def forward(self, input_ids, attention_mask):
+    def forward(self, input_ids, attention_mask, token_type_ids=None):
+        # Check if backbone supports token_type_ids
+        supports_tti = "token_type_ids" in self.backbone.forward.__code__.co_varnames
+
         out = self.backbone(
             input_ids=input_ids,
-            attention_mask=attention_mask
+            attention_mask=attention_mask,
+            token_type_ids=token_type_ids if supports_tti else None
         )
 
         pooled = self.pooling(out.last_hidden_state, attention_mask)
@@ -92,7 +96,11 @@ class MizanEncoderHF(PreTrainedModel):
         ).to(device)
 
         with torch.no_grad():
-            emb = self.forward(enc["input_ids"], enc["attention_mask"])
+            emb = self.forward(
+                enc["input_ids"],
+                enc["attention_mask"],
+                enc.get("token_type_ids")
+            )
 
         # return (batch, dim)
         return emb

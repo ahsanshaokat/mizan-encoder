@@ -79,7 +79,7 @@ class MizanTextEncoder(nn.Module):
     # -------------------------------------------------------------
     # Load the Encoder (like HuggingFace)
     @classmethod
-    def from_pretrained(cls, directory):
+    def from_pretrained_o1(cls, directory):
         with open(os.path.join(directory, "config.json"), "r") as f:
             cfg = json.load(f)
 
@@ -94,3 +94,37 @@ class MizanTextEncoder(nn.Module):
         model.load_state_dict(state_dict)
         print(f"Loaded model from {directory}")
         return model
+
+    @classmethod
+    def from_pretrained(cls, directory):
+        # Load config
+        config_path = os.path.join(directory, "config.json")
+        with open(config_path, "r") as f:
+            cfg = json.load(f)
+
+        model = cls(
+            backbone=cfg.get("backbone", cfg.get("backbone_name", "distilbert-base-uncased")),
+            proj_dim=cfg.get("proj_dim", 384),
+            alpha=cfg.get("alpha", 0.2),
+            load_transformer=True,
+        )
+
+        # Detect weight file
+        safetensor_path = os.path.join(directory, "model.safetensors")
+        bin_path = os.path.join(directory, "pytorch_model.bin")
+
+        if os.path.exists(safetensor_path):
+            print("🔵 Loading weights from model.safetensors")
+            state_dict = torch.load(safetensor_path, map_location="cpu")
+        elif os.path.exists(bin_path):
+            print("🔵 Loading weights from pytorch_model.bin")
+            state_dict = torch.load(bin_path, map_location="cpu")
+        else:
+            raise FileNotFoundError(
+                f"No weight file found. Expected model.safetensors or pytorch_model.bin in {directory}"
+            )
+
+        model.load_state_dict(state_dict, strict=False)
+        print(f"Loaded model from {directory}")
+        return model
+
