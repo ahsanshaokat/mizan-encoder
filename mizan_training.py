@@ -5,7 +5,7 @@ from torch.utils.data import DataLoader
 from transformers import AutoTokenizer, get_cosine_schedule_with_warmup
 
 from mizan_encoder.hf_model import MizanEncoderHF
-from mizan_encoder.loss import MizanLoss
+from mizan_encoder.loss import MizanContrastiveLoss, StableMizanLoss
 from mizan_encoder.data import load_sts_tsv, load_snli_jsonl, PairDataset
 
 
@@ -28,7 +28,7 @@ def collate_pairs(batch):
 
 
 # ------------------------------------------------------------
-# Training loop
+# Training loop - FIXED VERSION
 # ------------------------------------------------------------
 def train(config_path):
 
@@ -43,7 +43,8 @@ def train(config_path):
     model = MizanEncoderHF.from_pretrained(
         cfg["backbone"],
         pooling="balanced-mean",
-        proj_dim=cfg["proj_dim"]
+        proj_dim=cfg["proj_dim"],
+        alpha=cfg["alpha"]  # CRITICAL: Pass alpha
     )
 
     # -------------------------------
@@ -51,11 +52,15 @@ def train(config_path):
     # -------------------------------
     print("📘 Loading STS...")
     sts = load_sts_tsv(cfg["sts_path"], sample_size=cfg["sts_samples"])
+    print(f"Loaded STS pairs: {len(sts)}")
 
     print("📘 Loading SNLI...")
     nli = load_snli_jsonl(cfg["nli_path"], sample_size=cfg["nli_samples"])
+    print(f"Loaded SNLI pairs: {len(nli)}")
 
     all_pairs = sts + nli
+    print(f"Total pairs: {len(all_pairs)}")
+    
     dataset = PairDataset(all_pairs)
 
     loader = DataLoader(
@@ -73,6 +78,7 @@ def train(config_path):
 
     model = model.to(device)
 
+    # Use separate learning rates for backbone and projection
     optimizer = torch.optim.AdamW([
         {"params": model.backbone.parameters(), "lr": cfg["lr_backbone"]},
         {"params": model.proj.parameters(), "lr": cfg["lr_proj"]},
@@ -87,48 +93,93 @@ def train(config_path):
         num_training_steps=total_steps
     )
 
-    loss_fn = MizanLoss(alpha=cfg["alpha"])
+    # Use StableMizanLoss for robustness
+    loss_fn = StableMizanLoss(margin=0.3)
+    # Alternatively: loss_fn = MizanContrastiveLoss(margin=0.3)
+
+    # -------------------------------
+    # Debug helper
+    # -------------------------------
+    def debug_step(emb1, emb2, labels, step, loss):
+        if step % 100 == 0:
+            print(f"\n--- Step {step} Debug ---")
+            print(f"Loss: {loss.item():.6f}")
+            
+            # Check embeddings
+            norm1 = torch.norm(emb1, dim=-1)
+            norm2 = torch.norm(emb2, dim=-1)
+            print(f"Embedding norms - min: {norm1.min().item():.4f}, max: {norm1.max().item():.4f}")
+            print(f"Labels range: {labels.min().item():.2f} to {labels.max().item():.2f}")
+            
+            # Check for NaN
+            if torch.isnan(emb1).any() or torch.isnan(emb2).any():
+                print("⚠️ WARNING: NaN in embeddings!")
+            if torch.isnan(loss):
+                print("⚠️ WARNING: NaN loss!")
 
     # -------------------------------
     # Training loop
     # -------------------------------
     model.train()
-
+    
     for epoch in range(cfg["epochs"]):
+        print(f"\n🚀 Starting Epoch {epoch+1}/{cfg['epochs']}")
+        
         for step, (t1, t2, labels) in enumerate(loader):
-
-            t1 = tokenizer(t1, return_tensors="pt", padding=True, truncation=True).to(device)
-            t2 = tokenizer(t2, return_tensors="pt", padding=True, truncation=True).to(device)
-
+            
+            # Tokenize
+            t1_enc = tokenizer(t1, return_tensors="pt", padding=True, truncation=True, max_length=128).to(device)
+            t2_enc = tokenizer(t2, return_tensors="pt", padding=True, truncation=True, max_length=128).to(device)
+            
             labels = labels.to(device)
-
-            emb1 = model(**t1)
-            emb2 = model(**t2)
-
+            
+            # Forward pass
+            emb1 = model(**t1_enc)
+            emb2 = model(**t2_enc)
+            
+            # Check for NaN before loss
+            if torch.isnan(emb1).any() or torch.isnan(emb2).any():
+                print(f"⚠️ NaN in embeddings at step {step}, skipping batch")
+                continue
+            
+            # Compute loss
             loss = loss_fn(emb1, emb2, labels)
-
+            
+            # Check for NaN loss
+            if torch.isnan(loss):
+                print(f"⚠️ NaN loss at step {step}, skipping")
+                continue
+            
+            # Backward pass
             optimizer.zero_grad()
             loss.backward()
-
-            # Prevent NaNs
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-
+            
+            # Gradient clipping - CRITICAL for stability
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            
             optimizer.step()
             scheduler.step()
-
-            if step % 200 == 0:
+            
+            # Debug and logging
+            debug_step(emb1, emb2, labels, step, loss)
+            
+            if step % 50 == 0:
                 print(f"Epoch {epoch+1}/{cfg['epochs']} Step {step} | Loss = {loss.item():.4f}")
 
     # -------------------------------
     # Save final model
     # -------------------------------
     os.makedirs(cfg["output_dir"], exist_ok=True)
-    print("\n💾 Saving model:", cfg["output_dir"])
+    print(f"\n💾 Saving model to: {cfg['output_dir']}")
 
     model.save_pretrained(cfg["output_dir"])
     tokenizer.save_pretrained(cfg["output_dir"])
+    
+    # Save training config
+    with open(os.path.join(cfg["output_dir"], "training_config.json"), "w") as f:
+        json.dump(cfg, f, indent=2)
 
-    print("✅ Training complete. No NaNs should exist.")
+    print("✅ Training complete successfully!")
 
 
 if __name__ == "__main__":

@@ -28,9 +28,12 @@ class MizanTextEncoder(nn.Module):
 
     # -----------------------------------------
     def scale_stabilize(self, x):
-        eps = 1e-6
+        """Mizan vector normalization: x / norm^alpha"""
+        eps = 1e-8  # Increased for stability
         norm = torch.norm(x, dim=-1, keepdim=True)
-        return x / (norm + eps)**self.alpha
+        # Clamp norm to prevent division by near-zero
+        norm = torch.clamp(norm, min=1e-6)
+        return x / (norm**self.alpha + eps)
 
     # -----------------------------------------
     def forward(self, input_ids, attention_mask, token_type_ids=None):

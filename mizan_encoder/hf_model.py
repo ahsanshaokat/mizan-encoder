@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from transformers import PreTrainedModel, PretrainedConfig, AutoModel, AutoTokenizer
+from transformers import PreTrainedModel, PretrainedConfig, AutoModel
 
 from .pooling import BalancedMeanPooling
 
@@ -9,12 +9,13 @@ class MizanEncoderConfig(PretrainedConfig):
     model_type = "mizan-encoder"
 
     def __init__(self, backbone_name="sentence-transformers/all-MiniLM-L6-v2",
-                 pooling="balanced-mean", proj_dim=384, **kwargs):
+                 pooling="balanced-mean", proj_dim=384, alpha=0.15, **kwargs):
         super().__init__(**kwargs)
 
         self.backbone_name = backbone_name
         self.pooling = pooling
         self.proj_dim = proj_dim
+        self.alpha = alpha  # CRITICAL: Add alpha parameter
 
 
 class MizanEncoderHF(PreTrainedModel):
@@ -26,8 +27,9 @@ class MizanEncoderHF(PreTrainedModel):
         self.backbone = AutoModel.from_pretrained(config.backbone_name)
         hidden = self.backbone.config.hidden_size
 
-        self.pooling = BalancedMeanPooling()
+        self.pooler = BalancedMeanPooling()
         self.proj = nn.Linear(hidden, config.proj_dim)
+        self.alpha = config.alpha  # Use alpha from config
 
     def forward(self, input_ids, attention_mask, token_type_ids=None):
 
@@ -39,16 +41,22 @@ class MizanEncoderHF(PreTrainedModel):
             token_type_ids=token_type_ids if supports_tti else None
         )
 
-        pooled = self.pooling(out.last_hidden_state, attention_mask)
+        pooled = self.pooler(out.last_hidden_state, attention_mask)
         emb = self.proj(pooled)
-        emb = torch.nn.functional.normalize(emb, dim=-1)
-
+        
+        # MIZAN NORMALIZATION (Same as encoder.py)
+        eps = 1e-8
+        norm = torch.norm(emb, dim=-1, keepdim=True)
+        norm = torch.clamp(norm, min=1e-6)  # Clamp to prevent division by near-zero
+        emb = emb / (norm**self.alpha + eps)
+        
         return emb
 
     def encode(self, sentences, tokenizer=None, device="cpu"):
         if isinstance(sentences, str):
             sentences = [sentences]
 
+        from transformers import AutoTokenizer
         if tokenizer is None:
             tokenizer = AutoTokenizer.from_pretrained(self.config.backbone_name)
 
@@ -59,7 +67,3 @@ class MizanEncoderHF(PreTrainedModel):
             return self.forward(
                 enc["input_ids"], enc["attention_mask"], enc.get("token_type_ids")
             )
-
-
-def load_encoder(path):
-    return MizanEncoderHF.from_pretrained(path)
