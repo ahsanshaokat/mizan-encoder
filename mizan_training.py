@@ -283,7 +283,7 @@ if __name__ == "__main__":
         "lr": 1e-5,
 
         "sts_path": "scripts/data/sts_raw/STS-B/train.tsv",
-        "nli_path": "scripts/data/snli_1.0/snli_1_0_train.jsonl",
+        "nli_path": "scripts/data/snli_1.0/snli_1.0_train.jsonl",
 
         "sts_samples": 2000,
         "nli_samples": 8000,
