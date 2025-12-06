@@ -5,19 +5,19 @@
   "emb_dim": 384,
   "proj_dim": 384,
 
-  "batch_size": 16,
+  "batch_size": 32,
   "epochs": 1,
 
-  "alpha": 0.2,
+  "alpha": 0.15,
 
   "sts_path": "scripts/data/sts_raw/STS-B/train.tsv",
   "nli_path": "scripts/data/snli_1.0/snli_1.0_train.jsonl",
 
-  "sts_samples": 10000,
-  "nli_samples": 40000,
+  "sts_samples": 8000,
+  "nli_samples": 20000,
 
   "output_dir": "checkpoints/mizan_encoder_small_50k",
 
   "lr_backbone": 2e-5,
-  "lr_proj": 5e-4
+  "lr_proj": 3e-4
 }
