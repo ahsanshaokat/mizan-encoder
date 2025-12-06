@@ -130,9 +130,8 @@ def debug_train():
         # Forward pass with debug
         print("\n📊 Forward pass debug:")
         try:
-            with torch.no_grad():
-                emb1 = model(**inputs1)
-                emb2 = model(**inputs2)
+            emb1 = model(**inputs1)
+            emb2 = model(**inputs2)
             
             print(f"Embedding 1 shape: {emb1.shape}")
             print(f"Embedding 1 norm: {torch.norm(emb1, dim=-1).item():.4f}")
