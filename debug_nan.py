@@ -6,7 +6,7 @@ from transformers import AutoModel, AutoTokenizer
 # Debug Model with NaN tracing
 # ------------------------------------------------------------
 class DebugMizanEncoder(nn.Module):
-    def __init__(self, backbone="sentence-transformers/all-MiniLM-L6-v2", proj_dim=384, alpha=0.15):
+    def __init__(self, backbone="checkpoints/mizan_singlefile", proj_dim=384, alpha=0.15):
         super().__init__()
         
         print(f"🔧 Initializing with backbone: {backbone}")
@@ -180,12 +180,12 @@ def test_single_sentence():
     
     # Model and tokenizer
     model = DebugMizanEncoder(
-        backbone="sentence-transformers/all-MiniLM-L6-v2",
+        backbone="checkpoints/mizan_singlefile",
         proj_dim=384,
         alpha=0.15
     ).to(device)
     
-    tokenizer = AutoTokenizer.from_pretrained("sentence-transformers/all-MiniLM-L6-v2")
+    tokenizer = AutoTokenizer.from_pretrained("checkpoints/mizan_singlefile")
     
     # Test sentences
     test_sentences = [
@@ -238,12 +238,12 @@ def test_batch():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
     model = DebugMizanEncoder(
-        backbone="sentence-transformers/all-MiniLM-L6-v2",
+        backbone="checkpoints/mizan_singlefile",
         proj_dim=384,
         alpha=0.15
     ).to(device)
     
-    tokenizer = AutoTokenizer.from_pretrained("sentence-transformers/all-MiniLM-L6-v2")
+    tokenizer = AutoTokenizer.from_pretrained("checkpoints/mizan_singlefile")
     
     # Test batch
     sentences = [
