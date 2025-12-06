@@ -11,75 +11,53 @@ from transformers import AutoTokenizer, AutoModel, get_cosine_schedule_with_warm
 # ============================================================
 
 def load_sts(path, sample_size=None):
-    """Load STS-B data (tab-separated):
-       sentence1 | sentence2 | score
-       Skips header rows safely.
-    """
     pairs = []
-
     with open(path, "r", encoding="utf-8") as f:
         for line in f:
             parts = line.strip().split("\t")
-
-            # Skip malformed or header lines
             if len(parts) < 7:
                 continue
-
-            # Try parsing the score column
             try:
                 score = float(parts[4])
-            except ValueError:
-                # This happens for header "old_index" or similar → SKIP
+            except:
                 continue
-
             s1, s2 = parts[5], parts[6]
-            score = score / 5.0  # normalize 0–1
-
+            score = score / 5.0      # normalize 0–1
             pairs.append((s1, s2, score))
 
     if sample_size:
         pairs = random.sample(pairs, min(sample_size, len(pairs)))
-
     return pairs
 
 
-
 def load_snli(path, sample_size=None):
-    """Load SNLI JSONL: convert labels to similarity scores."""
     import json
-
     label_to_score = {
         "entailment": 1.0,
         "neutral": 0.5,
         "contradiction": 0.0
     }
-
     pairs = []
     with open(path, "r", encoding="utf-8") as f:
         for line in f:
             obj = json.loads(line)
-            if obj["gold_label"] not in label_to_score:
+            l = obj["gold_label"]
+            if l not in label_to_score:
                 continue
-            s1 = obj["sentence1"]
-            s2 = obj["sentence2"]
-            score = label_to_score[obj["gold_label"]]
-            pairs.append((s1, s2, score))
+            pairs.append((obj["sentence1"], obj["sentence2"], label_to_score[l]))
 
     if sample_size:
         pairs = random.sample(pairs, min(sample_size, len(pairs)))
-
     return pairs
 
 
 class PairDataset(Dataset):
     def __init__(self, pairs):
         self.pairs = pairs
-
-    def __getitem__(self, idx):
-        return self.pairs[idx]
-
     def __len__(self):
         return len(self.pairs)
+    def __getitem__(self, idx):
+        return self.pairs[idx]
 
 
 def collate_batch(batch):
@@ -94,21 +72,15 @@ def collate_batch(batch):
 # ============================================================
 
 class BalancedMeanPooling(nn.Module):
-    """Mean pooling that avoids NaNs & empty masks."""
-
     def forward(self, hidden, mask):
         mask = mask.unsqueeze(-1).float()
-        weighted = hidden * mask
-        summed = weighted.sum(dim=1)
+        masked = hidden * mask
+        numerator = masked.sum(dim=1)
         denom = mask.sum(dim=1).clamp(min=1e-6)
-        return summed / denom
+        return numerator / denom
 
 
 class MizanEncoder(nn.Module):
-    """Minimal Mizan encoder:
-    HF backbone → pooling → projection → Mizan scaling
-    """
-
     def __init__(self, backbone_name="sentence-transformers/all-MiniLM-L6-v2",
                  proj_dim=384, alpha=0.15):
         super().__init__()
@@ -126,45 +98,64 @@ class MizanEncoder(nn.Module):
         nn.init.zeros_(self.proj.bias)
 
     def scale_stabilize(self, x):
-        """Mizan power-normalization."""
         norm = torch.norm(x, dim=-1, keepdim=True).clamp(min=1e-6)
-        denom = norm.pow(self.alpha)
-        return x / denom
+        return x / (norm ** self.alpha)
 
     def forward(self, input_ids, attention_mask, token_type_ids=None):
         out = self.backbone(
             input_ids=input_ids,
             attention_mask=attention_mask,
-            token_type_ids=token_type_ids,
+            token_type_ids=token_type_ids
         )
-
         pooled = self.pool(out.last_hidden_state, attention_mask)
-
         h = self.proj(pooled)
         h = self.norm(h)
         h = self.scale_stabilize(h)
-
         return h
 
 
 # ============================================================
-#                 MIZAN SIMILARITY LOSS (STABLE)
+#       🔥 PROPER MIZAN LOSS v2 — SCALE-AWARE, STABLE
 # ============================================================
 
-class MizanLoss(nn.Module):
-    """Stable similarity loss."""
-
-    def __init__(self, margin=0.3):
+class MizanLossV2(nn.Module):
+    """
+    True Mizan similarity optimization:
+    - Uses dot-products (scale-sensitive)
+    - Encourages proportional similarity
+    - Includes norm penalty to prevent explosion
+    """
+    def __init__(self, alpha=0.15, beta_norm=0.05, beta_dp=0.3):
         super().__init__()
-        self.margin = margin
+        self.alpha = alpha
+        self.beta_norm = beta_norm
+        self.beta_dp = beta_dp
 
     def forward(self, e1, e2, labels):
-        cos = torch.nn.functional.cosine_similarity(e1, e2)
+        """
+        labels in [0,1]
+        """
 
-        pos = labels * (1 - cos)                # positives push toward 1
-        neg = (1 - labels) * torch.relu(cos - self.margin)
+        # ----- (1) Mizan similarity -----
+        dot = (e1 * e2).sum(dim=-1)
 
-        return (pos + neg).mean()
+        # norms
+        n1 = e1.norm(dim=-1)
+        n2 = e2.norm(dim=-1)
+
+        mizan = dot / ((n1 ** self.alpha) * (n2 ** self.alpha) + 1e-8)
+
+        # ----- (2) proportional similarity loss -----
+        mse = (mizan - labels)**2
+
+        # ----- (3) dot-product consistency penalty -----
+        # ensures dot ~ proportional to labels
+        dp_term = self.beta_dp * ((dot - labels * dot.mean().detach())**2)
+
+        # ----- (4) norm penalty -----
+        norm_term = self.beta_norm * (n1 + n2)
+
+        return (mse + dp_term + norm_term).mean()
 
 
 # ============================================================
@@ -187,11 +178,9 @@ def train_mizan(config):
 
     print("\nLoading datasets...")
 
-    sts_pairs = load_sts(config["sts_path"], sample_size=config["sts_samples"])
-    nli_pairs = load_snli(config["nli_path"], sample_size=config["nli_samples"])
-
-    all_pairs = sts_pairs + nli_pairs
-    dataset = PairDataset(all_pairs)
+    sts = load_sts(config["sts_path"], config["sts_samples"])
+    nli = load_snli(config["nli_path"], config["nli_samples"])
+    dataset = PairDataset(sts + nli)
 
     loader = DataLoader(
         dataset, batch_size=config["batch_size"],
@@ -207,9 +196,7 @@ def train_mizan(config):
         num_training_steps=total_steps
     )
 
-    loss_fn = MizanLoss(margin=0.3)
-
-    # -------- TRAINING --------
+    loss_fn = MizanLossV2(alpha=config["alpha"])
 
     print("\n=========== TRAINING START ===========")
 
@@ -217,10 +204,9 @@ def train_mizan(config):
 
     for epoch in range(config["epochs"]):
         print(f"\nEpoch {epoch+1}/{config['epochs']}")
-
         for step, (t1, t2, y) in enumerate(loader):
 
-            batch = tokenizer(
+            enc = tokenizer(
                 t1 + t2,
                 return_tensors="pt",
                 padding=True,
@@ -228,31 +214,26 @@ def train_mizan(config):
                 max_length=128
             )
 
-            # split encoded batch
             bs = len(t1)
-            input_ids = batch["input_ids"].to(device)
-            att = batch["attention_mask"].to(device)
+            ids = enc["input_ids"].to(device)
+            att = enc["attention_mask"].to(device)
 
-            emb1 = model(input_ids[:bs], att[:bs])
-            emb2 = model(input_ids[bs:], att[bs:])
-
+            e1 = model(ids[:bs], att[:bs])
+            e2 = model(ids[bs:], att[bs:])
             y = y.to(device)
 
-            loss = loss_fn(emb1, emb2, y)
+            loss = loss_fn(e1, e2, y)
 
             optimizer.zero_grad()
             loss.backward()
-
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-
             optimizer.step()
             scheduler.step()
 
             if step % 100 == 0:
                 print(f"Step {step} | Loss {loss.item():.4f}")
 
-    # -------- SAVE --------
-
+    # ===== SAVE =====
     os.makedirs(config["output_dir"], exist_ok=True)
 
     print("\nSaving model...")
@@ -270,16 +251,13 @@ def train_mizan(config):
 # ============================================================
 
 if __name__ == "__main__":
-
     config = {
         "backbone": "sentence-transformers/all-MiniLM-L6-v2",
-
         "proj_dim": 384,
         "alpha": 0.15,
 
         "batch_size": 16,
         "epochs": 1,
-
         "lr": 1e-5,
 
         "sts_path": "scripts/data/sts_raw/STS-B/train.tsv",
@@ -288,7 +266,7 @@ if __name__ == "__main__":
         "sts_samples": 2000,
         "nli_samples": 8000,
 
-        "output_dir": "checkpoints/mizan_singlefile"
+        "output_dir": "checkpoints/mizan_properloss"
     }
 
     train_mizan(config)
