@@ -1,3 +1,4 @@
+
 import os
 import json
 import torch
@@ -26,31 +27,78 @@ class MizanTextEncoder(nn.Module):
         self.pooler = BalancedMeanPooling()
         self.proj = nn.Linear(hidden, proj_dim)
 
-    # -----------------------------------------
     def scale_stabilize(self, x):
-        """Mizan vector normalization: x / norm^alpha"""
-        eps = 1e-8  # Increased for stability
+        """Safe Mizan normalization"""
+        eps = 1e-6
+        
+        # Check for NaN/Inf
+        if torch.isnan(x).any() or torch.isinf(x).any():
+            print("⚠️ WARNING: NaN/Inf in scale_stabilize input")
+            x = torch.nan_to_num(x, nan=0.0, posinf=1.0, neginf=-1.0)
+        
+        # Calculate norm with safety
         norm = torch.norm(x, dim=-1, keepdim=True)
-        # Clamp norm to prevent division by near-zero
-        norm = torch.clamp(norm, min=1e-6)
-        return x / (norm**self.alpha + eps)
+        
+        # Clamp norm to safe range
+        norm = torch.clamp(norm, min=1e-6, max=1e6)
+        
+        # Apply Mizan normalization
+        result = x / (norm**self.alpha + eps)
+        
+        # Final safety check
+        result = torch.nan_to_num(result, nan=0.0, posinf=1.0, neginf=-1.0)
+        
+        return result
 
-    # -----------------------------------------
     def forward(self, input_ids, attention_mask, token_type_ids=None):
+        # Safety check inputs
+        if torch.isnan(input_ids).any():
+            print("⚠️ WARNING: NaN in input_ids")
+            return torch.zeros((input_ids.size(0), self.proj_dim), 
+                             device=input_ids.device)
+        
+        try:
+            supports_tti = "token_type_ids" in self.transformer.forward.__code__.co_varnames
 
-        supports_tti = "token_type_ids" in self.transformer.forward.__code__.co_varnames
+            out = self.transformer(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                token_type_ids=token_type_ids if supports_tti else None,
+                return_dict=True
+            )
 
-        out = self.transformer(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            token_type_ids=token_type_ids if supports_tti else None,
-        )
+            # Check transformer output
+            if torch.isnan(out.last_hidden_state).any():
+                print("⚠️ WARNING: NaN in transformer output")
+                # Return zero embeddings
+                return torch.zeros((input_ids.size(0), self.proj_dim), 
+                                 device=input_ids.device)
 
-        pooled = self.pooler(out.last_hidden_state, attention_mask)
-        projected = self.proj(pooled)
-        stabilized = self.scale_stabilize(projected)
+            pooled = self.pooler(out.last_hidden_state, attention_mask)
+            
+            # Check pooling output
+            if torch.isnan(pooled).any():
+                print("⚠️ WARNING: NaN after pooling")
+                # Initialize projection layer and use it
+                projected = self.proj(torch.zeros_like(pooled))
+            else:
+                projected = self.proj(pooled)
+            
+            stabilized = self.scale_stabilize(projected)
+            
+            # Final safety check
+            if torch.isnan(stabilized).any():
+                print("⚠️ WARNING: NaN in final output, returning zeros")
+                stabilized = torch.zeros_like(stabilized)
+            
+            return stabilized
+            
+        except Exception as e:
+            print(f"⚠️ ERROR in forward pass: {e}")
+            # Return safe zero embeddings
+            return torch.zeros((input_ids.size(0), self.proj_dim), 
+                             device=input_ids.device)
 
-        return stabilized
 
     # -----------------------------------------
     def save_pretrained(self, directory):
