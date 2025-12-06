@@ -1,186 +1,279 @@
 import os
 import json
+import random
 import torch
-from torch.utils.data import DataLoader
-from transformers import AutoTokenizer, get_cosine_schedule_with_warmup
+import torch.nn as nn
+from torch.utils.data import Dataset, DataLoader
+from transformers import AutoTokenizer, AutoModel, get_cosine_schedule_with_warmup
 
-from mizan_encoder.hf_model import MizanEncoderHF
-from mizan_encoder.loss import MizanContrastiveLoss, StableMizanLoss
-from mizan_encoder.data import load_sts_tsv, load_snli_jsonl, PairDataset
+# ============================================================
+#                      DATA LOADING
+# ============================================================
+
+def load_sts(path, sample_size=None):
+    """Load STS-B data (tab-separated):
+       sentence1 | sentence2 | score"""
+    pairs = []
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            parts = line.strip().split("\t")
+            if len(parts) < 7:
+                continue
+            s1, s2, score = parts[5], parts[6], float(parts[4])
+            score = score / 5.0   # normalize to [0,1]
+            pairs.append((s1, s2, score))
+
+    if sample_size:
+        pairs = random.sample(pairs, min(sample_size, len(pairs)))
+
+    return pairs
 
 
-# ------------------------------------------------------------
-# Load config
-# ------------------------------------------------------------
-def load_config(path):
-    with open(path, "r") as f:
-        return json.load(f)
+def load_snli(path, sample_size=None):
+    """Load SNLI JSONL: convert labels to similarity scores."""
+    import json
+
+    label_to_score = {
+        "entailment": 1.0,
+        "neutral": 0.5,
+        "contradiction": 0.0
+    }
+
+    pairs = []
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            obj = json.loads(line)
+            if obj["gold_label"] not in label_to_score:
+                continue
+            s1 = obj["sentence1"]
+            s2 = obj["sentence2"]
+            score = label_to_score[obj["gold_label"]]
+            pairs.append((s1, s2, score))
+
+    if sample_size:
+        pairs = random.sample(pairs, min(sample_size, len(pairs)))
+
+    return pairs
 
 
-# ------------------------------------------------------------
-# Collate function (batching strings)
-# ------------------------------------------------------------
-def collate_pairs(batch):
-    t1 = [x[0] for x in batch]
-    t2 = [x[1] for x in batch]
-    lab = torch.tensor([x[2] for x in batch], dtype=torch.float)
-    return t1, t2, lab
+class PairDataset(Dataset):
+    def __init__(self, pairs):
+        self.pairs = pairs
+
+    def __getitem__(self, idx):
+        return self.pairs[idx]
+
+    def __len__(self):
+        return len(self.pairs)
 
 
-# ------------------------------------------------------------
-# Training loop - FIXED VERSION
-# ------------------------------------------------------------
-def train(config_path):
+def collate_batch(batch):
+    t1 = [b[0] for b in batch]
+    t2 = [b[1] for b in batch]
+    y = torch.tensor([b[2] for b in batch], dtype=torch.float)
+    return t1, t2, y
 
-    cfg = load_config(config_path)
-    print("📄 Loaded config:", cfg)
 
-    # -------------------------------
-    # Tokenizer + Model
-    # -------------------------------
-    tokenizer = AutoTokenizer.from_pretrained(cfg["backbone"])
+# ============================================================
+#                MIZAN ENCODER IMPLEMENTATION
+# ============================================================
 
-    model = MizanEncoderHF.from_pretrained(
-        cfg["backbone"],
-        pooling="balanced-mean",
-        proj_dim=cfg["proj_dim"],
-        alpha=cfg["alpha"]  # CRITICAL: Pass alpha
-    )
+class BalancedMeanPooling(nn.Module):
+    """Mean pooling that avoids NaNs & empty masks."""
 
-    # -------------------------------
-    # Datasets
-    # -------------------------------
-    print("📘 Loading STS...")
-    sts = load_sts_tsv(cfg["sts_path"], sample_size=cfg["sts_samples"])
-    print(f"Loaded STS pairs: {len(sts)}")
+    def forward(self, hidden, mask):
+        mask = mask.unsqueeze(-1).float()
+        weighted = hidden * mask
+        summed = weighted.sum(dim=1)
+        denom = mask.sum(dim=1).clamp(min=1e-6)
+        return summed / denom
 
-    print("📘 Loading SNLI...")
-    nli = load_snli_jsonl(cfg["nli_path"], sample_size=cfg["nli_samples"])
-    print(f"Loaded SNLI pairs: {len(nli)}")
 
-    all_pairs = sts + nli
-    print(f"Total pairs: {len(all_pairs)}")
-    
+class MizanEncoder(nn.Module):
+    """Minimal Mizan encoder:
+    HF backbone → pooling → projection → Mizan scaling
+    """
+
+    def __init__(self, backbone_name="sentence-transformers/all-MiniLM-L6-v2",
+                 proj_dim=384, alpha=0.15):
+        super().__init__()
+
+        self.backbone = AutoModel.from_pretrained(backbone_name)
+        hid = self.backbone.config.hidden_size
+
+        self.pool = BalancedMeanPooling()
+        self.proj = nn.Linear(hid, proj_dim)
+        self.norm = nn.LayerNorm(proj_dim)
+
+        self.alpha = alpha
+
+        nn.init.xavier_uniform_(self.proj.weight)
+        nn.init.zeros_(self.proj.bias)
+
+    def scale_stabilize(self, x):
+        """Mizan power-normalization."""
+        norm = torch.norm(x, dim=-1, keepdim=True).clamp(min=1e-6)
+        denom = norm.pow(self.alpha)
+        return x / denom
+
+    def forward(self, input_ids, attention_mask, token_type_ids=None):
+        out = self.backbone(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            token_type_ids=token_type_ids,
+        )
+
+        pooled = self.pool(out.last_hidden_state, attention_mask)
+
+        h = self.proj(pooled)
+        h = self.norm(h)
+        h = self.scale_stabilize(h)
+
+        return h
+
+
+# ============================================================
+#                 MIZAN SIMILARITY LOSS (STABLE)
+# ============================================================
+
+class MizanLoss(nn.Module):
+    """Stable similarity loss."""
+
+    def __init__(self, margin=0.3):
+        super().__init__()
+        self.margin = margin
+
+    def forward(self, e1, e2, labels):
+        cos = torch.nn.functional.cosine_similarity(e1, e2)
+
+        pos = labels * (1 - cos)                # positives push toward 1
+        neg = (1 - labels) * torch.relu(cos - self.margin)
+
+        return (pos + neg).mean()
+
+
+# ============================================================
+#                     TRAINING LOOP
+# ============================================================
+
+def train_mizan(config):
+
+    print("\n=========== CONFIG ===========")
+    print(json.dumps(config, indent=2))
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    tokenizer = AutoTokenizer.from_pretrained(config["backbone"])
+    model = MizanEncoder(
+        backbone_name=config["backbone"],
+        proj_dim=config["proj_dim"],
+        alpha=config["alpha"]
+    ).to(device)
+
+    print("\nLoading datasets...")
+
+    sts_pairs = load_sts(config["sts_path"], sample_size=config["sts_samples"])
+    nli_pairs = load_snli(config["nli_path"], sample_size=config["nli_samples"])
+
+    all_pairs = sts_pairs + nli_pairs
     dataset = PairDataset(all_pairs)
 
     loader = DataLoader(
-        dataset,
-        batch_size=cfg["batch_size"],
-        shuffle=True,
-        collate_fn=collate_pairs
+        dataset, batch_size=config["batch_size"],
+        shuffle=True, collate_fn=collate_batch
     )
 
-    # -------------------------------
-    # Prepare training
-    # -------------------------------
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print("🔥 Training on:", device)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=config["lr"], weight_decay=0.01)
 
-    model = model.to(device)
-
-    # Use separate learning rates for backbone and projection
-    optimizer = torch.optim.AdamW([
-        {"params": model.backbone.parameters(), "lr": cfg["lr_backbone"]},
-        {"params": model.proj.parameters(), "lr": cfg["lr_proj"]},
-    ], weight_decay=0.01)
-
-    total_steps = len(loader) * cfg["epochs"]
-    warmup = int(0.1 * total_steps)
-
+    total_steps = len(loader) * config["epochs"]
     scheduler = get_cosine_schedule_with_warmup(
         optimizer,
-        num_warmup_steps=warmup,
+        num_warmup_steps=int(0.1 * total_steps),
         num_training_steps=total_steps
     )
 
-    # Use StableMizanLoss for robustness
-    loss_fn = StableMizanLoss(margin=0.3)
-    # Alternatively: loss_fn = MizanContrastiveLoss(margin=0.3)
+    loss_fn = MizanLoss(margin=0.3)
 
-    # -------------------------------
-    # Debug helper
-    # -------------------------------
-    def debug_step(emb1, emb2, labels, step, loss):
-        if step % 100 == 0:
-            print(f"\n--- Step {step} Debug ---")
-            print(f"Loss: {loss.item():.6f}")
-            
-            # Check embeddings
-            norm1 = torch.norm(emb1, dim=-1)
-            norm2 = torch.norm(emb2, dim=-1)
-            print(f"Embedding norms - min: {norm1.min().item():.4f}, max: {norm1.max().item():.4f}")
-            print(f"Labels range: {labels.min().item():.2f} to {labels.max().item():.2f}")
-            
-            # Check for NaN
-            if torch.isnan(emb1).any() or torch.isnan(emb2).any():
-                print("⚠️ WARNING: NaN in embeddings!")
-            if torch.isnan(loss):
-                print("⚠️ WARNING: NaN loss!")
+    # -------- TRAINING --------
 
-    # -------------------------------
-    # Training loop
-    # -------------------------------
+    print("\n=========== TRAINING START ===========")
+
     model.train()
-    
-    for epoch in range(cfg["epochs"]):
-        print(f"\n🚀 Starting Epoch {epoch+1}/{cfg['epochs']}")
-        
-        for step, (t1, t2, labels) in enumerate(loader):
-            
-            # Tokenize
-            t1_enc = tokenizer(t1, return_tensors="pt", padding=True, truncation=True, max_length=128).to(device)
-            t2_enc = tokenizer(t2, return_tensors="pt", padding=True, truncation=True, max_length=128).to(device)
-            
-            labels = labels.to(device)
-            
-            # Forward pass
-            emb1 = model(**t1_enc)
-            emb2 = model(**t2_enc)
-            
-            # Check for NaN before loss
-            if torch.isnan(emb1).any() or torch.isnan(emb2).any():
-                print(f"⚠️ NaN in embeddings at step {step}, skipping batch")
-                continue
-            
-            # Compute loss
-            loss = loss_fn(emb1, emb2, labels)
-            
-            # Check for NaN loss
-            if torch.isnan(loss):
-                print(f"⚠️ NaN loss at step {step}, skipping")
-                continue
-            
-            # Backward pass
+
+    for epoch in range(config["epochs"]):
+        print(f"\nEpoch {epoch+1}/{config['epochs']}")
+
+        for step, (t1, t2, y) in enumerate(loader):
+
+            batch = tokenizer(
+                t1 + t2,
+                return_tensors="pt",
+                padding=True,
+                truncation=True,
+                max_length=128
+            )
+
+            # split encoded batch
+            bs = len(t1)
+            input_ids = batch["input_ids"].to(device)
+            att = batch["attention_mask"].to(device)
+
+            emb1 = model(input_ids[:bs], att[:bs])
+            emb2 = model(input_ids[bs:], att[bs:])
+
+            y = y.to(device)
+
+            loss = loss_fn(emb1, emb2, y)
+
             optimizer.zero_grad()
             loss.backward()
-            
-            # Gradient clipping - CRITICAL for stability
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            
+
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+
             optimizer.step()
             scheduler.step()
-            
-            # Debug and logging
-            debug_step(emb1, emb2, labels, step, loss)
-            
-            if step % 50 == 0:
-                print(f"Epoch {epoch+1}/{cfg['epochs']} Step {step} | Loss = {loss.item():.4f}")
 
-    # -------------------------------
-    # Save final model
-    # -------------------------------
-    os.makedirs(cfg["output_dir"], exist_ok=True)
-    print(f"\n💾 Saving model to: {cfg['output_dir']}")
+            if step % 100 == 0:
+                print(f"Step {step} | Loss {loss.item():.4f}")
 
-    model.save_pretrained(cfg["output_dir"])
-    tokenizer.save_pretrained(cfg["output_dir"])
-    
-    # Save training config
-    with open(os.path.join(cfg["output_dir"], "training_config.json"), "w") as f:
-        json.dump(cfg, f, indent=2)
+    # -------- SAVE --------
 
-    print("✅ Training complete successfully!")
+    os.makedirs(config["output_dir"], exist_ok=True)
 
+    print("\nSaving model...")
+    torch.save(model.state_dict(), os.path.join(config["output_dir"], "mizan_encoder.pt"))
+    tokenizer.save_pretrained(config["output_dir"])
+
+    with open(os.path.join(config["output_dir"], "config.json"), "w") as f:
+        json.dump(config, f, indent=2)
+
+    print("✔ Training complete!")
+
+
+# ============================================================
+#                         MAIN ENTRY
+# ============================================================
 
 if __name__ == "__main__":
-    train("configs/small.json")
+
+    config = {
+        "backbone": "sentence-transformers/all-MiniLM-L6-v2",
+
+        "proj_dim": 384,
+        "alpha": 0.15,
+
+        "batch_size": 16,
+        "epochs": 1,
+
+        "lr": 1e-5,
+
+        "sts_path": "scripts/data/sts_raw/STS-B/train.tsv",
+        "nli_path": "scripts/data/snli_1.0/snli_1_0_train.jsonl",
+
+        "sts_samples": 2000,
+        "nli_samples": 8000,
+
+        "output_dir": "checkpoints/mizan_singlefile"
+    }
+
+    train_mizan(config)
