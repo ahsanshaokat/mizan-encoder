@@ -64,11 +64,14 @@ class MizanEvalEncoder(nn.Module):
 def cosine_sim(a, b):
     return torch.nn.functional.cosine_similarity(a, b).item()
 
-def mizan_sim(a, b, alpha=0.2):
-    dot = (a * b).sum(-1)
-    n1 = a.norm(dim=-1)
-    n2 = b.norm(dim=-1)
-    return (dot / ((n1 ** alpha) * (n2 ** alpha))).item()
+def mizan_sim(e1, e2, alpha=0.15):
+    dot = (e1 * e2).sum(dim=-1)
+    n1 = e1.norm(dim=-1).clamp(min=1e-6)
+    n2 = e2.norm(dim=-1).clamp(min=1e-6)
+
+    raw = dot / ((n1**alpha) * (n2**alpha))
+    return (raw / (1 + raw.abs())).item()  # → range (-1, +1)
+
 
 
 # ============================================================
