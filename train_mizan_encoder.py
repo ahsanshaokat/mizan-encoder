@@ -457,7 +457,7 @@ def evaluate_stsb(model, tokenizer, device):
             miz = mizan_similarity(e1, e2).item()
             pred_scores.append(miz)
 
-            gold = normalize_score(row["similarity_score"])
+            gold = row["label"] / 5.0
             gold_scores.append(gold)
 
     pear = pearsonr(pred_scores, gold_scores)[0]
