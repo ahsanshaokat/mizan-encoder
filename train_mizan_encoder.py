@@ -267,7 +267,8 @@ def load_sts(tokenizer):
 # ------------------------------------------------------------
 
 def load_sick(tokenizer):
-    ds = load_dataset("mteb/sick")  # NEW HF location
+    # Compatible SICK dataset mirror
+    ds = load_dataset("huggingface-project/sick")
 
     pairs = []
     for split in ["train", "validation"]:
@@ -277,8 +278,9 @@ def load_sick(tokenizer):
             score = (row["relatedness_score"] - 1) / 4  # normalize 1–5 → 0–1
             pairs.append(PairData(s1, s2, float(score)))
 
-    logger.info(f"[SICK] Loaded {len(pairs)} pairs (new HF dataset)")
+    logger.info(f"[SICK] Loaded {len(pairs)} pairs (HF compatible mirror)")
     return pairs
+
 
 
 # ------------------------------------------------------------
