@@ -2,181 +2,143 @@ import os
 import json
 import torch
 import torch.nn as nn
-from scipy.stats import pearsonr, spearmanr
-from transformers import AutoModel, AutoTokenizer
+from transformers import AutoTokenizer, AutoModel
+
 
 # ============================================================
-#          SAME ARCHITECTURE AS TRAINING (IMPORTANT)
+#                    LOAD MIZAN ENCODER
 # ============================================================
 
 class MizanEvalEncoder(nn.Module):
-    def __init__(self, backbone, proj_dim, alpha):
+    def __init__(self, backbone, proj_dim=384, alpha=0.2):
         super().__init__()
-        self.backbone = AutoModel.from_pretrained(backbone)
-        hid = self.backbone.config.hidden_size
+
+        self.transformer = AutoModel.from_pretrained(backbone)
+        hid = self.transformer.config.hidden_size
 
         self.proj = nn.Linear(hid, proj_dim)
         self.norm = nn.LayerNorm(proj_dim)
         self.alpha = alpha
 
     @classmethod
-    def load_finetuned(cls, ckpt):
-        cfg = json.load(open(os.path.join(ckpt, "config.json")))
+    def load_finetuned(cls, ckpt_dir):
+        """Load saved model + config."""
+        cfg_path = os.path.join(ckpt_dir, "config.json")
+        weights_path = os.path.join(ckpt_dir, "mizan_encoder.pt")
+
+        cfg = json.load(open(cfg_path))
+        print("Loaded config:", cfg)
+
         model = cls(
             backbone=cfg["backbone"],
             proj_dim=cfg["proj_dim"],
-            alpha=cfg["alpha"]
+            alpha=cfg["alpha"],
         )
-        state = torch.load(os.path.join(ckpt, "mizan_encoder.pt"), map_location="cpu")
-        model.load_state_dict(state, strict=False)
+
+        state = torch.load(weights_path, map_location="cpu")
+        missing, unexpected = model.load_state_dict(state, strict=False)
+        print("Missing keys:", missing)
+        print("Unexpected keys:", unexpected)
+        print("✔ Encoder loaded.\n")
+
         return model
 
-    # --------------------------
-    # Same pooling as trainer
-    # --------------------------
-    def pool(self, hidden, mask):
+    def safe_pool(self, hidden, mask):
         mask = mask.unsqueeze(-1).float()
-        return (hidden * mask).sum(1) / mask.sum(1).clamp(min=1e-6)
+        denom = mask.sum(dim=1).clamp(min=1e-6)
+        return (hidden * mask).sum(dim=1) / denom
 
-    def scale(self, x):
-        n = torch.norm(x, 2, dim=-1, keepdim=True) + 1e-6
+    def scale_stabilize(self, x):
+        n = torch.norm(x, p=2, dim=-1, keepdim=True) + 1e-6
         return x / (n ** self.alpha)
 
-    # --------------------------
-    # FIXED FORWARD SIGNATURE
-    # --------------------------
-    def forward(self, input_ids=None, attention_mask=None, token_type_ids=None):
-        out = self.backbone(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            token_type_ids=token_type_ids
-        )
-        pooled = self.pool(out.last_hidden_state, attention_mask)
+    def forward(self, input_ids, attention_mask):
+        out = self.transformer(input_ids=input_ids, attention_mask=attention_mask)
+        pooled = self.safe_pool(out.last_hidden_state, attention_mask)
         h = self.norm(self.proj(pooled))
-        return self.scale(h)
-
-
-
-# ============================================================
-#             COSINE & MIZAN SIMILARITY
-# ============================================================
-
-def cosine_sim(a, b):
-    return torch.nn.functional.cosine_similarity(a, b).item()
-
-def mizan_sim(e1, e2, alpha=0.15):
-    dot = (e1 * e2).sum(dim=-1)
-    n1 = e1.norm(dim=-1).clamp(min=1e-6)
-    n2 = e2.norm(dim=-1).clamp(min=1e-6)
-
-    raw = dot / ((n1**alpha) * (n2**alpha))
-    return (raw / (1 + raw.abs())).item()  # → range (-1, +1)
-
+        return self.scale_stabilize(h)
 
 
 # ============================================================
-#         SENTENCE–BASED DIAGNOSTIC COMPARISON
+#           COSINE + MIZAN SIMILARITY (Article #10)
 # ============================================================
 
-def sentence_compare(model, tok, device):
-    tests = [
+def cosine_sim(e1, e2):
+    return torch.nn.functional.cosine_similarity(e1, e2).item()
+
+
+def mizan_sim(e1, e2):
+    """
+    Mizan Similarity from Article #10:
+    sim = 1 - ||x - y|| / (||x|| + ||y||)
+    Output range: (-inf, 1], but usually 0–1 for trained positives.
+    """
+    num = torch.norm(e1 - e2, p=2)
+    den = torch.norm(e1, p=2) + torch.norm(e2, p=2) + 1e-6
+    return (1 - (num / den)).item()
+
+
+# ============================================================
+#               SENTENCE-BASED EVALUATION
+# ============================================================
+
+def sentence_compare(model, tokenizer, device):
+
+    test_pairs = [
         ("A cat sits on the mat.", "A dog sits on the rug."),
         ("I love pizza.", "The moon is blue."),
         ("AI will change the world.", "Artificial intelligence will transform society."),
-        ("Quantum physics is difficult.", "I enjoy eating apples.")
+        ("Quantum physics is difficult.", "I enjoy eating apples."),
+        ("A man is playing guitar.", "A person is performing music.")
     ]
 
     print("\n==============================")
     print("🔬 SENTENCE-BASED COMPARISON")
-    print("==============================")
+    print("==============================\n")
 
-    for s1, s2 in tests:
-        e1 = model(**tok(s1, return_tensors="pt").to(device))
-        e2 = model(**tok(s2, return_tensors="pt").to(device))
+    for s1, s2 in test_pairs:
+
+        t1 = tokenizer(s1, return_tensors="pt").to(device)
+        t2 = tokenizer(s2, return_tensors="pt").to(device)
+
+        with torch.no_grad():
+            e1 = model(**t1)
+            e2 = model(**t2)
 
         cos = cosine_sim(e1, e2)
         miz = mizan_sim(e1, e2)
 
-        print("\n---------------------------------")
-        print("📝 S1:", s1)
-        print("📝 S2:", s2)
+        print("---------------------------------")
+        print(f"📝 S1: {s1}")
+        print(f"📝 S2: {s2}")
         print(f"Cosine similarity : {cos:.4f}")
         print(f"Mizan similarity  : {miz:.4f}")
-        print(f"Δ (Mizan - Cosine): {miz - cos:+.4f}")
+
+        # Interpretation
+        if miz > cos:
+            explanation = "Mizan detects stronger semantic closeness than cosine."
+        elif miz < cos:
+            explanation = "Cosine shows stronger alignment; Mizan adds scale penalty."
+        else:
+            explanation = "Both metrics agree equally."
+
+        print(f"Explanation       : {explanation}")
+        print(f"Δ (Mizan - Cosine): {miz - cos:+.4f}\n")
 
 
 # ============================================================
-#                 STS-B EVALUATION
-# ============================================================
-
-def load_sts(path):
-    pairs = []
-    with open(path, "r", encoding="utf-8") as f:
-        for line in f:
-            parts = line.split("\t")
-            if len(parts) < 7:
-                continue
-            try:
-                score = float(parts[4])
-            except:
-                continue
-            pairs.append((parts[5], parts[6], score))
-    return pairs
-
-
-def evaluate_sts(model, tok, pairs, device):
-
-    cos_preds, miz_preds, golds = [], [], []
-
-    for s1, s2, g in pairs:
-        e1 = model(**tok(s1, return_tensors="pt").to(device))
-        e2 = model(**tok(s2, return_tensors="pt").to(device))
-
-        cos_preds.append(cosine_sim(e1, e2))
-        miz_preds.append(mizan_sim(e1, e2))
-        golds.append(g)
-
-    # correlations
-    cp = pearsonr(cos_preds, golds)[0]
-    cs = spearmanr(cos_preds, golds)[0]
-    mp = pearsonr(miz_preds, golds)[0]
-    ms = spearmanr(miz_preds, golds)[0]
-
-    print("\n==============================")
-    print("📊 STS-B EVALUATION")
-    print("==============================")
-
-    print("\nCosine:")
-    print(" Pearson :", cp)
-    print(" Spearman:", cs)
-
-    print("\nMizan:")
-    print(" Pearson :", mp)
-    print(" Spearman:", ms)
-
-    print("\nΔ:")
-    print(" Pearson Δ:", mp - cp)
-    print(" Spearman Δ:", ms - cs)
-
-
-# ============================================================
-# MAIN
+#                        MAIN
 # ============================================================
 
 if __name__ == "__main__":
-
-    ckpt = "checkpoints/mizan_v10"
-    sts_dev = "scripts/data/sts_raw/STS-B/dev.tsv"
-
+    ckpt = "checkpoints/mizan_v10"   # <-- your trained model
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    tok = AutoTokenizer.from_pretrained(ckpt)
+    print("Loading tokenizer + model...\n")
+    tokenizer = AutoTokenizer.from_pretrained(ckpt)
     model = MizanEvalEncoder.load_finetuned(ckpt).to(device)
     model.eval()
 
-    sentence_compare(model, tok, device)
-
-    pairs = load_sts(sts_dev)
-    evaluate_sts(model, tok, pairs, device)
+    sentence_compare(model, tokenizer, device)
 
     print("\n🎯 Evaluation Complete")

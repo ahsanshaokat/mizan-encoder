@@ -7,11 +7,11 @@ from torch.utils.data import DataLoader, Dataset
 from transformers import AutoTokenizer, AutoModel, get_cosine_schedule_with_warmup
 
 # ============================================================
-#                    DATA LOADING
+#                 DATA LOADING (Binary Labels Only)
 # ============================================================
 
 def load_sts(path, n=None):
-    """Load STS-B train split."""
+    """Load STS-B but keep ONLY strong positives and negatives."""
     pairs = []
     with open(path, "r", encoding="utf-8") as f:
         for line in f:
@@ -22,27 +22,40 @@ def load_sts(path, n=None):
                 score = float(parts[4])
             except:
                 continue
+
             s1, s2 = parts[5], parts[6]
-            label = score / 5.0          # 0–1
-            pairs.append((s1, s2, label))
+            label = score / 5.0
+
+            # --------- Option 1 rules ---------
+            if label >= 0.8:
+                pairs.append((s1, s2, 1))
+            elif label <= 0.3:
+                pairs.append((s1, s2, 0))
+            # else ignore mid-range
     if n:
         pairs = random.sample(pairs, min(len(pairs), n))
     return pairs
 
 
 def load_snli(path, n=None):
-    """Load SNLI JSONL."""
+    """Load SNLI but SKIP neutral cases."""
     import json
-    m = {"entailment": 1.0, "neutral": 0.5, "contradiction": 0.0}
-
     pairs = []
+
     with open(path, "r", encoding="utf-8") as f:
         for line in f:
             obj = json.loads(line)
-            y = m.get(obj["gold_label"], None)
-            if y is None:
-                continue
+            lbl = obj["gold_label"]
+
+            if lbl == "entailment":
+                y = 1
+            elif lbl == "contradiction":
+                y = 0
+            else:
+                continue  # skip neutral
+
             pairs.append((obj["sentence1"], obj["sentence2"], y))
+
     if n:
         pairs = random.sample(pairs, min(len(pairs), n))
     return pairs
@@ -65,7 +78,7 @@ def collate(batch):
 
 
 # ============================================================
-#                 MIZAN ENCODER (Article #10)
+#                    MIZAN ENCODER
 # ============================================================
 
 class BalancedMeanPooling(nn.Module):
@@ -77,7 +90,7 @@ class BalancedMeanPooling(nn.Module):
 
 
 class MizanEncoder(nn.Module):
-    """Transformer → Balanced Mean Pooling → Linear → LayerNorm → Scale-Stabilizer"""
+    """Transformer → Balanced Pool → Projection → LayerNorm → Scale Stabilizer"""
     def __init__(self, backbone, proj_dim=384, alpha=0.2):
         super().__init__()
         self.transformer = AutoModel.from_pretrained(backbone)
@@ -104,14 +117,10 @@ class MizanEncoder(nn.Module):
 
 
 # ============================================================
-#              TRUE MIZAN CONTRASTIVE LOSS (Article #10)
+#                MIZAN CONTRASTIVE LOSS (Article #10)
 # ============================================================
 
 class MizanContrastiveLoss(nn.Module):
-    """
-    The official MizanContrastiveLoss from Article #10.
-    No collapse, positive + negative contrastive forces.
-    """
     def __init__(self, margin=0.5, p=2, eps=1e-6):
         super().__init__()
         self.margin = margin
@@ -126,14 +135,14 @@ class MizanContrastiveLoss(nn.Module):
     def forward(self, e1, e2, label):
         sim = self.mizan_sim(e1, e2)
 
-        pos = 1 - sim                        # positive want sim → 1
-        neg = torch.relu(self.margin - sim)  # negatives must be below margin
+        pos = 1 - sim
+        neg = torch.relu(self.margin - sim)
 
-        return torch.where(label == 1, pos, neg).mean()
+        return torch.where(label == 1, pos, neg), sim  # return sim for logging
 
 
 # ============================================================
-#                    TRAINING LOOP
+#                    TRAINING LOOP (With Logs)
 # ============================================================
 
 def train(config):
@@ -143,6 +152,9 @@ def train(config):
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
+    # ----------------------------------------
+    # Load tokenizer + model
+    # ----------------------------------------
     tokenizer = AutoTokenizer.from_pretrained(config["backbone"])
     model = MizanEncoder(
         backbone=config["backbone"],
@@ -150,12 +162,19 @@ def train(config):
         alpha=config["alpha"],
     ).to(device)
 
-    # load & mix datasets
+    # ----------------------------------------
+    # Dataset
+    # ----------------------------------------
     sts  = load_sts(config["sts_path"], config["sts_samples"])
     snli = load_snli(config["nli_path"], config["nli_samples"])
-    dataset = PairDataset(sts + snli)
 
-    loader = DataLoader(dataset, batch_size=config["batch_size"], shuffle=True, collate_fn=collate)
+    dataset = PairDataset(sts + snli)
+    print(f"\nLoaded dataset: {len(dataset)} pairs")
+    print(f"Positives: {sum([1 for x in dataset.pairs if x[2]==1])}")
+    print(f"Negatives: {sum([1 for x in dataset.pairs if x[2]==0])}")
+
+    loader = DataLoader(dataset, batch_size=config["batch_size"],
+                        shuffle=True, collate_fn=collate)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=config["lr"])
     total_steps = len(loader) * config["epochs"]
@@ -174,24 +193,41 @@ def train(config):
     for ep in range(config["epochs"]):
         for step, (s1, s2, labels) in enumerate(loader):
 
-            batch = tokenizer(
-                s1 + s2,
-                return_tensors="pt",
-                padding=True,
-                truncation=True,
-                max_length=128,
-            )
+            # --------------------------
+            # Tokenize and forward pass
+            # --------------------------
+            batch = tokenizer(s1 + s2, return_tensors="pt",
+                              padding=True, truncation=True, max_length=128)
 
             bs = len(s1)
             ids  = batch["input_ids"].to(device)
             mask = batch["attention_mask"].to(device)
 
-            e1 = model(ids[:bs],  mask[:bs])
+            e1 = model(ids[:bs], mask[:bs])
             e2 = model(ids[bs:], mask[bs:])
 
             labels = labels.to(device)
-            loss = loss_fn(e1, e2, labels)
 
+            # --------------------------
+            # Compute loss + similarity
+            # --------------------------
+            loss_each, sim_vals = loss_fn(e1, e2, labels)
+            loss = loss_each.mean()
+
+            # --------------------------
+            # Logging DEBUG INFO
+            # --------------------------
+            if step % 50 == 0:
+                print(f"\n--- DEBUG Step {step} ---")
+                print(f"Label batch example: {labels[:5].tolist()}")
+                print(f"Mizan similarity example: {sim_vals[:5].tolist()}")
+                print(f"Loss components example: {loss_each[:5].tolist()}")
+                print(f"Embedding norm e1: {torch.norm(e1,dim=-1)[:3].tolist()}")
+                print(f"Embedding norm e2: {torch.norm(e2,dim=-1)[:3].tolist()}")
+
+            # --------------------------
+            # Backprop
+            # --------------------------
             optimizer.zero_grad()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -201,36 +237,14 @@ def train(config):
             if step % 100 == 0:
                 print(f"Ep {ep+1} Step {step} | Loss {loss.item():.4f}")
 
-    # 保存
+    # ----------------------------------------
+    # Save model
+    # ----------------------------------------
     os.makedirs(config["output_dir"], exist_ok=True)
     torch.save(model.state_dict(), f"{config['output_dir']}/mizan_encoder.pt")
     tokenizer.save_pretrained(config["output_dir"])
+
     with open(f"{config['output_dir']}/config.json", "w") as f:
         json.dump(config, f, indent=2)
 
     print("\n✔ Training complete!")
-
-
-# ============================================================
-# MAIN
-# ============================================================
-
-if __name__ == "__main__":
-    config = {
-        "backbone": "sentence-transformers/all-MiniLM-L6-v2",
-        "proj_dim": 384,
-        "alpha": 0.2,
-
-        "batch_size": 16,
-        "epochs": 1,
-        "lr": 1e-5,
-
-        "sts_path": "scripts/data/sts_raw/STS-B/train.tsv",
-        "nli_path": "scripts/data/snli_1.0/snli_1.0_train.jsonl",
-        "sts_samples": 2000,
-        "nli_samples": 8000,
-
-        "output_dir": "checkpoints/mizan_v10"
-    }
-
-    train(config)
