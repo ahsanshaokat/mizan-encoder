@@ -263,27 +263,6 @@ def load_sts(tokenizer):
 
 
 # ------------------------------------------------------------
-#                           SICK
-# ------------------------------------------------------------
-
-def load_sick(tokenizer):
-    # Compatible SICK dataset mirror
-    ds = load_dataset("huggingface-project/sick")
-
-    pairs = []
-    for split in ["train", "validation"]:
-        for row in ds[split]:
-            s1 = row["sentence_A"]
-            s2 = row["sentence_B"]
-            score = (row["relatedness_score"] - 1) / 4  # normalize 1–5 → 0–1
-            pairs.append(PairData(s1, s2, float(score)))
-
-    logger.info(f"[SICK] Loaded {len(pairs)} pairs (HF compatible mirror)")
-    return pairs
-
-
-
-# ------------------------------------------------------------
 #                          PAWS-X
 # ------------------------------------------------------------
 
@@ -381,14 +360,12 @@ def generate_hard_negatives(pairs, num_negs=30000):
 
 def build_full_dataset(tokenizer):
     sts = load_sts(tokenizer)
-    sick = load_sick(tokenizer)
     paws = load_paws(tokenizer)
     nli = load_nli(tokenizer, max_samples=40000)
 
     # Combine + Weight
     full = []
     full.extend(sts)     # 1.0x
-    full.extend(sick)    # 1.0x
     full.extend(paws)    # 1.0x
     full.extend(nli)     # reduced by limiting max_samples
 
