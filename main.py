@@ -59,8 +59,8 @@ class MizanMappedEncoder(nn.Module):
         stabilized = x / (n ** self.alpha)
 
         print("\n[SCALE DEBUG]")
-        print("  raw_norms:", n.squeeze()[:3].tolist())
-        print("  stabilized_norms:", torch.norm(stabilized, dim=-1)[:3].tolist())
+        print("  raw_norms:", n.view(-1)[:3].tolist())
+        print("  stabilized_norms:", torch.norm(stabilized, dim=-1).view(-1)[:3].tolist())
 
         return stabilized
 
