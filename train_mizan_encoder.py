@@ -82,7 +82,7 @@ class MizanEncoder(nn.Module):
             x' = x / ||x||^alpha
         """
         norms = torch.norm(x, p=2, dim=-1, keepdim=True).clamp(min=1e-6)
-        return x / (norms ** self.alpha)
+        return x * (norms ** -self.alpha)  # more stable than x / norms**alpha
 
     def forward(self, input_ids, attention_mask):
         out = self.transformer(
@@ -101,69 +101,64 @@ class MizanEncoder(nn.Module):
 #                    Mizan Similarity
 # ============================================================
 
-def mizan_similarity(e1, e2):
+def mizan_similarity(e1, e2, p=2, eps=1e-6):
     """
     M = 1 - ||e1 - e2|| / (||e1|| + ||e2||)
     """
-    num = torch.norm(e1 - e2, p=2, dim=-1)
-    den = torch.norm(e1, p=2, dim=-1) + torch.norm(e2, p=2, dim=-1) + 1e-6
+    num = torch.norm(e1 - e2, p=p, dim=-1)
+    den = torch.norm(e1, p=p, dim=-1) + torch.norm(e2, p=p, dim=-1) + eps
     return 1 - (num / den)
 
 
 # ============================================================
-#                    Training Loss Functions
+#        Correct MizanContrastiveLoss (Official Formula)
 # ============================================================
 
-class MizanLoss(nn.Module):
+class MizanContrastiveLoss(nn.Module):
     """
-    Combined training objective:
-    - Mizan similarity regression loss
-    - Cosine auxiliary loss
-    - Contrastive margin for negative samples
+    Official Mizan contrastive objective (Article #9 & #10):
+
+        Positive (label = 1):
+            L_pos = 1 - M(x,y)
+
+        Negative (label = 0):
+            L_neg = max(0, margin - M(x,y))
+
+        Mizan similarity:
+            M = 1 - ||x - y|| / (||x|| + ||y||)
     """
 
-    def __init__(self, w_mizan=1.0, w_cos=0.3, w_margin=0.2, margin=0.4):
+    def __init__(self, margin=0.5, p=2, eps=1e-6):
         super().__init__()
-        self.w_mizan = w_mizan
-        self.w_cos = w_cos
-        self.w_margin = w_margin
         self.margin = margin
+        self.p = p
+        self.eps = eps
 
-        self.mse = nn.MSELoss()
-        self.cos = nn.CosineSimilarity(dim=-1)
+    def mizan_sim(self, x, y):
+        num = torch.norm(x - y, p=self.p, dim=-1)
+        den = torch.norm(x, p=self.p, dim=-1) + torch.norm(y, p=self.p, dim=-1) + self.eps
+        return 1 - (num / den)
 
     def forward(self, e1, e2, labels):
         """
-        labels: similarity score (0 to 1)
+        labels: 1 = positive, 0 = negative
         """
 
-        # ---- Mizan similarity regression ----
-        miz = mizan_similarity(e1, e2)
-        miz_loss = self.mse(miz, labels)
+        sim = self.mizan_sim(e1, e2)
 
-        # ---- Cosine auxiliary loss ----
-        cos_sim = self.cos(e1, e2)
-        cos_loss = self.mse(cos_sim, labels)
+        # Positive pair loss
+        pos_loss = 1 - sim
 
-        # ---- Contrastive margin loss ----
-        pos_mask = labels > 0.5
-        neg_mask = labels <= 0.5
+        # Negative pair loss
+        neg_loss = torch.clamp(self.margin - sim, min=0)
 
-        margin_loss = 0.0
-        if neg_mask.any():
-            neg_pairs = 1 - mizan_similarity(e1[neg_mask], e2[neg_mask])
-            margin_loss = torch.clamp(self.margin - neg_pairs, min=0).mean()
+        # Select per example based on label
+        loss = torch.where(labels >= 0.5, pos_loss, neg_loss)
 
-        total = (
-            self.w_mizan * miz_loss +
-            self.w_cos * cos_loss +
-            self.w_margin * margin_loss
-        )
-
-        return total, {
-            "mizan_loss": miz_loss.item(),
-            "cos_loss": cos_loss.item(),
-            "margin_loss": margin_loss if isinstance(margin_loss, float) else margin_loss.item(),
+        return loss.mean(), {
+            "mizan_sim_mean": sim.mean().item(),
+            "pos_loss_mean": pos_loss.mean().item(),
+            "neg_loss_mean": neg_loss.mean().item(),
         }
 
 
@@ -376,6 +371,10 @@ def build_full_dataset(tokenizer):
     random.shuffle(full)
     logger.info(f"[Dataset] Final combined pairs: {len(full)}")
 
+    # Convert all labels to binary for contrastive training
+    for p in full:
+        p.score = binarize(p.score)
+
     return full
 
 
@@ -412,7 +411,7 @@ def evaluate_stsb(model, tokenizer, device):
     """
     Evaluate on STS-B dev using Mizan similarity.
     """
-    ds = load_dataset("stsb_multi_mt", "en")["validation"]
+    ds = load_dataset("glue", "stsb")["validation"]
 
     gold_scores = []
     pred_scores = []
@@ -462,12 +461,13 @@ def train_step(model, batch, loss_fn, optimizer, device):
     labels = batch["labels"].to(device)
 
     loss, logs = loss_fn(e1, e2, labels)
+    loss_value = loss.item()
 
     loss.backward()
     optimizer.step()
     optimizer.zero_grad()
 
-    return loss.item(), logs
+    return loss_value, logs
 
 
 # ============================================================
@@ -490,7 +490,7 @@ def run_stage(
     if unfreeze_layers is not None:
         for name, param in model.transformer.named_parameters():
             for layer_id in unfreeze_layers:
-                if f"layer.{layer_id}." in name:
+                if f"encoder.layer.{layer_id}." in name:
                     param.requires_grad = True
 
     # Projection + LN must always be trainable
@@ -536,7 +536,7 @@ def hybrid_train(model, tokenizer, train_pairs, device, batch_size=32):
         shuffle=True, collate_fn=collate_fn
     )
 
-    loss_fn = MizanLoss()
+    loss_fn = MizanContrastiveLoss(margin=0.5)
 
     # ---------------- Stage 1 ---------------- #
     run_stage(
@@ -564,7 +564,7 @@ def hybrid_train(model, tokenizer, train_pairs, device, batch_size=32):
     )
 
     # ---------------- Stage 3 ---------------- #
-    all_layers = list(range(12))  # unfreeze all encoder layers
+    all_layers = list(range(model.transformer.config.num_hidden_layers))  # unfreeze all encoder layers
     run_stage(
         model=model,
         dataloader=dataloader,
@@ -602,9 +602,18 @@ def save_mizan(model, tokenizer, out_dir="mizan_trained_encoder"):
     logger.info(f"[SAVE] Model saved to {out_dir}")
 
 
+def binarize(score):
+    """
+    Convert similarity scores into binary labels:
+    - >= 0.8 → positive
+    - < 0.8 → negative
+    """
+    return 1.0 if score >= 0.8 else 0.0
+
 # ============================================================
 #                     MAIN
 # ============================================================
+
 
 def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
