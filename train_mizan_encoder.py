@@ -178,7 +178,7 @@ class PairDataset(Dataset):
     Generic dataset handling for STS/SICK/PAWS/etc.
     """
 
-    def __init__(self, pairs: List[PairData], tokenizer, max_length=128):
+    def __init__(self, pairs: List[PairData], tokenizer, max_length=64):
         self.data = pairs
         self.tokenizer = tokenizer
         self.max_length = max_length
@@ -353,7 +353,7 @@ def generate_hard_negatives(pairs, num_negs=30000):
 #             Combine All Datasets (Weighted)
 # ============================================================
 
-def build_full_dataset(tokenizer):
+def build_full_dataset_v2(tokenizer):
     sts = load_sts(tokenizer)
     paws = load_paws(tokenizer)
     nli = load_nli(tokenizer, max_samples=40000)
@@ -377,6 +377,25 @@ def build_full_dataset(tokenizer):
 
     return full
 
+def build_full_dataset(tokenizer):
+    sts = load_sts(tokenizer)
+
+    # ↓↓↓ REDUCE PAWS-X ↓↓↓
+    paws = load_paws(tokenizer)
+    paws = random.sample(paws, min(len(paws), 10000))
+
+    # ↓↓↓ REDUCE NLI ↓↓↓
+    nli = load_nli(tokenizer, max_samples=10000)  # SNLI+MNLI = ~20k
+
+    # ↓↓↓ REDUCE HARD NEGATIVES ↓↓↓
+    hard_negs = generate_hard_negatives(sts + paws + nli, num_negs=5000)
+
+    full = sts + paws + nli + hard_negs
+    random.shuffle(full)
+
+    logger.info(f"[Dataset] Final combined pairs: {len(full)}")
+
+    return full
 
 # ============================================================
 #                Collate Function for Dataloader
@@ -423,12 +442,12 @@ def evaluate_stsb(model, tokenizer, device):
             s2 = row["sentence2"]
 
             inputs1 = tokenizer(
-                s1, return_tensors="pt", max_length=128,
+                s1, return_tensors="pt", max_length=64,
                 truncation=True, padding="max_length"
             ).to(device)
 
             inputs2 = tokenizer(
-                s2, return_tensors="pt", max_length=128,
+                s2, return_tensors="pt", max_length=64,
                 truncation=True, padding="max_length"
             ).to(device)
 
@@ -529,7 +548,7 @@ def run_stage(
 #                  Full Hybrid Training Pipeline
 # ============================================================
 
-def hybrid_train(model, tokenizer, train_pairs, device, batch_size=32):
+def hybrid_train(model, tokenizer, train_pairs, device, batch_size=16):
     dataset = PairDataset(train_pairs, tokenizer)
     dataloader = DataLoader(
         dataset, batch_size=batch_size,
@@ -564,17 +583,18 @@ def hybrid_train(model, tokenizer, train_pairs, device, batch_size=32):
     )
 
     # ---------------- Stage 3 ---------------- #
-    all_layers = list(range(model.transformer.config.num_hidden_layers))  # unfreeze all encoder layers
-    run_stage(
-        model=model,
-        dataloader=dataloader,
-        device=device,
-        stage_name="Stage 3: Full fine-tuning",
-        lr=5e-6,
-        num_epochs=1,
-        loss_fn=loss_fn,
-        unfreeze_layers=all_layers
-    )
+    # all_layers = list(range(model.transformer.config.num_hidden_layers))  # unfreeze all encoder layers
+    # run_stage(
+    #     model=model,
+    #     dataloader=dataloader,
+    #     device=device,
+    #     stage_name="Stage 3: Full fine-tuning",
+    #     lr=5e-6,
+    #     num_epochs=1,
+    #     loss_fn=loss_fn,
+    #     unfreeze_layers=all_layers
+    # )
+    logger.info("Skipping Stage 3 for fast training mode")
 
 
 # ============================================================
