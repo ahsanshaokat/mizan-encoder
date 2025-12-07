@@ -64,8 +64,8 @@ class MizanMappedEncoder(nn.Module):
 
         return stabilized
 
-    def forward(self, input_ids, attention_mask):
-        out = self.transformer(input_ids=input_ids, attention_mask=attention_mask)
+    def forward(self, input_ids, attention_mask, token_type_ids=None):
+        out = self.transformer(input_ids=input_ids, attention_mask=attention_mask, token_type_ids=token_type_ids)
 
         pooled = self.pool(out.last_hidden_state, attention_mask)
         projected = self.proj(pooled)
@@ -78,7 +78,7 @@ class MizanMappedEncoder(nn.Module):
 
         print("[ENCODER DEBUG] final_embedding_norm:", torch.norm(encoded, dim=-1)[:3].tolist())
         return encoded
-
+    
 
 # ============================================================
 #            COSINE + MIZAN SIM (WITH RAW DEBUG)
