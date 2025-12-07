@@ -12,7 +12,6 @@ from transformers import AutoModel, AutoTokenizer
 class MizanEvalEncoder(nn.Module):
     def __init__(self, backbone, proj_dim, alpha):
         super().__init__()
-
         self.backbone = AutoModel.from_pretrained(backbone)
         hid = self.backbone.config.hidden_size
 
@@ -23,30 +22,39 @@ class MizanEvalEncoder(nn.Module):
     @classmethod
     def load_finetuned(cls, ckpt):
         cfg = json.load(open(os.path.join(ckpt, "config.json")))
-
         model = cls(
             backbone=cfg["backbone"],
             proj_dim=cfg["proj_dim"],
             alpha=cfg["alpha"]
         )
-
         state = torch.load(os.path.join(ckpt, "mizan_encoder.pt"), map_location="cpu")
         model.load_state_dict(state, strict=False)
         return model
+
+    # --------------------------
+    # Same pooling as trainer
+    # --------------------------
+    def pool(self, hidden, mask):
+        mask = mask.unsqueeze(-1).float()
+        return (hidden * mask).sum(1) / mask.sum(1).clamp(min=1e-6)
 
     def scale(self, x):
         n = torch.norm(x, 2, dim=-1, keepdim=True) + 1e-6
         return x / (n ** self.alpha)
 
-    def pool(self, h, m):
-        m = m.unsqueeze(-1).float()
-        return (h * m).sum(1) / m.sum(1).clamp(min=1e-6)
-
-    def forward(self, ids, mask):
-        out = self.backbone(input_ids=ids, attention_mask=mask)
-        pooled = self.pool(out.last_hidden_state, mask)
+    # --------------------------
+    # FIXED FORWARD SIGNATURE
+    # --------------------------
+    def forward(self, input_ids=None, attention_mask=None, token_type_ids=None):
+        out = self.backbone(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            token_type_ids=token_type_ids
+        )
+        pooled = self.pool(out.last_hidden_state, attention_mask)
         h = self.norm(self.proj(pooled))
         return self.scale(h)
+
 
 
 # ============================================================
