@@ -248,3 +248,29 @@ def train(config):
         json.dump(config, f, indent=2)
 
     print("\n✔ Training complete!")
+
+    
+# ============================================================
+# MAIN
+# ============================================================
+
+if __name__ == "__main__":
+    config = {
+        "backbone": "sentence-transformers/all-MiniLM-L6-v2",
+        "proj_dim": 384,
+        "alpha": 0.2,
+
+        "batch_size": 16,
+        "epochs": 1,
+        "lr": 1e-5,
+
+        "sts_path": "scripts/data/sts_raw/STS-B/train.tsv",
+        "nli_path": "scripts/data/snli_1.0/snli_1.0_train.jsonl",
+        "sts_samples": 2000,
+        "nli_samples": 8000,
+
+        "output_dir": "checkpoints/mizan_v10"
+    }
+
+    train(config)
+
