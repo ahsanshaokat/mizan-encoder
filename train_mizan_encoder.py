@@ -267,17 +267,17 @@ def load_sts(tokenizer):
 # ------------------------------------------------------------
 
 def load_sick(tokenizer):
-    ds = load_dataset("sick")
-    pairs = []
+    ds = load_dataset("mteb/sick")  # NEW HF location
 
+    pairs = []
     for split in ["train", "validation"]:
         for row in ds[split]:
             s1 = row["sentence_A"]
             s2 = row["sentence_B"]
-            score = (row["relatedness_score"] - 1) / 4  # convert 1-5 -> 0-1
+            score = (row["relatedness_score"] - 1) / 4  # normalize 1–5 → 0–1
             pairs.append(PairData(s1, s2, float(score)))
 
-    logger.info(f"[SICK] Loaded {len(pairs)} pairs")
+    logger.info(f"[SICK] Loaded {len(pairs)} pairs (new HF dataset)")
     return pairs
 
 
