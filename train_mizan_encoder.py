@@ -246,10 +246,11 @@ def normalize_score(score):
 # ------------------------------------------------------------
 
 def load_sts(tokenizer):
-    ds = load_dataset("stsb_multi_mt", "en")  # multilingual but contains en
+    ds = load_dataset("stsb_multi_mt", "en")
 
     pairs = []
-    for split in ["train", "validation"]:
+    # stsb_multi_mt has: train, test (no validation)
+    for split in ["train", "test"]:
         for row in ds[split]:
             s1 = row["sentence1"]
             s2 = row["sentence2"]
@@ -258,6 +259,7 @@ def load_sts(tokenizer):
 
     logger.info(f"[STS] Loaded {len(pairs)} pairs")
     return pairs
+
 
 
 # ------------------------------------------------------------
@@ -298,6 +300,7 @@ def load_paws(tokenizer):
     return pairs
 
 
+
 # ------------------------------------------------------------
 #                          SNLI + MNLI
 # ------------------------------------------------------------
@@ -323,7 +326,7 @@ def load_nli(tokenizer, max_samples=60000):
             s1 = row["premise"]
             s2 = row["hypothesis"]
             score = label_nli(row)
-            pairs.append(PPairData(s1, s2, score))
+            pairs.append(PairData(s1, s2, score))
             if len(pairs) >= max_samples:
                 break
 
