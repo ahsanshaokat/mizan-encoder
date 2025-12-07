@@ -52,11 +52,16 @@ class MizanEvalEncoder(nn.Module):
         n = torch.norm(x, p=2, dim=-1, keepdim=True) + 1e-6
         return x / (n ** self.alpha)
 
-    def forward(self, input_ids, attention_mask):
-        out = self.transformer(input_ids=input_ids, attention_mask=attention_mask)
+    def forward(self, input_ids, attention_mask, token_type_ids=None):
+        out = self.transformer(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            token_type_ids=token_type_ids
+        )
         pooled = self.safe_pool(out.last_hidden_state, attention_mask)
         h = self.norm(self.proj(pooled))
         return self.scale_stabilize(h)
+
 
 
 # ============================================================
